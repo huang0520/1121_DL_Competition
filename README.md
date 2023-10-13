@@ -21,7 +21,7 @@
 
 為了一定程度上的程式碼一致性，我希望統一使用 Black formatter 來格式化程式碼。Extension 的 Recommendation 我已經設置好，打開 `VSCode Marketplace` 應該就可以在推薦區看到。
 
-而格式化的相關設定都已在 `Workspace` 的設定中設置好，如果想確認有什麼設定，請查看 `1121_DL_Competition/.vscode/settings.json`。
+而格式化的相關設定都已在 `vscode.workspace` 的設定中設置好，如果想確認有什麼設定，請查看 [settings.json](huang0520/1121_DL_Competition/blob/main/.vscode/settings.json)。
 
 ### 命名規範
 
