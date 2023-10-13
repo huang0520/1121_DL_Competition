@@ -1,0 +1,8 @@
+name: DL_Comp
+channels:
+  - pytorch
+  - conda-forge
+
+dependencies:
+  - python=3.10.*
+  - pip

@@ -1,0 +1,22 @@
+{
+  // 啟動格式化設定，可依照個人喜好調整，上傳前記得格式化就好
+  "editor.formatOnSave": true,
+  "editor.formatOnPaste": true,
+  // ipynb 啟動格式化設定
+  "notebook.formatOnSave.enabled": true,
+  // 避免使用 autopeap8 進行格式化，不用在意 Warning
+  "python.formatting.provider": "none",
+
+  // 去除多餘空白，只保留一行
+  "files.insertFinalNewline": true,
+  "files.trimTrailingWhitespace": true,
+
+  // .py, .ipynb 使用 Black 格式化
+  "[python]": {
+    "editor.defaultFormatter": "ms-python.black-formatter"
+  },
+  "black-formatter.args": ["--line-length", "88"],
+
+  // 使用 Pylance 作為 Python LSP (Syntax-highlighting, Intellisense, Formatting, Refactoring, Linting, ...)
+  "python.languageServer": "Pylance"
+}
