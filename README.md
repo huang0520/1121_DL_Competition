@@ -33,6 +33,10 @@
 
 ### Git 規範
 
-為了方便管理，main 會被我鎖起來。我會先開各自的三個 Branch，到時候看有人完成的差不多，其他兩人看看再 Merge 到 main。
+為了方便管理，main 會被我鎖起來。請自行拉一個 Branch 出去，等到一個區塊完成的差不多再通過 PR merge 回 main。
+
+### 註解建議
+
+這部份不是規範，但我希望兩位要多寫點 Comment 方便之後大家去看 Code 的時候會比較容易點。然後 Jupyter 的 Markdown 功能可以多用，寫長串或是解釋整個 Block 會比 Comment 好用。
 
 ## 程式分割
