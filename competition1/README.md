@@ -33,6 +33,7 @@ Class Dataset{
   y_train: pd.DataFrame
   y_val: pd.DataFrame
   x_test: pd.DataFrame
+  id_test: pd.Series
 }
 ```
 
@@ -43,6 +44,8 @@ Class Dataset{
 輸入：
 
 ```
-// 對 Popularity 的預測
+# 對 Popularity 的預測
 y_pred: np.numpy
+# test 資料的 ID
+id_test: pd.Series
 ```
