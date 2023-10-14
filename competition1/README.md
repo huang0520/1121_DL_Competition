@@ -23,29 +23,64 @@
 
 下載到`./input`並讀取指定輸入檔案
 
+#### Interface
+輸入：
+```
+out-of-core: bool
+```
+
 輸出：
 
 ```
 @dataclass
-Class Dataset{
+class Dataset:
   x_train: pd.DataFrame
   x_val: pd.DataFrame
   y_train: pd.DataFrame
   y_val: pd.DataFrame
   x_test: pd.DataFrame
   id_test: pd.Series
-}
 ```
 
 ### Output
 
 將預測輸出成指定格式到`./output/`
 
+#### Interface
 輸入：
 
 ```
 # 對 Popularity 的預測
 y_pred: np.numpy
+
 # test 資料的 ID
 id_test: pd.Series
 ```
+
+輸出：無
+
+### Feature Engineering
+
+除了基礎的將輸入文本 Vectorized，還有新增一些新特徵之類的功能。
+
+要建立一個調用各種功能的 Function，方便後續去選擇不同的特徵可以簡單點。
+
+#### Interface
+輸入：
+```
+# 後續再依據需求調整
+@Dataclass
+class FeatureParams:
+  convert_method: str
+  ...
+```
+
+輸出：
+```
+@dataclass
+class VectorizedDataset:
+  x_train: pd.DataFrame
+  x_val: pd.DataFrame
+  x_test: pd.DataFrame
+```
+
