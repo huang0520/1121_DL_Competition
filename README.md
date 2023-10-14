@@ -18,7 +18,7 @@
 
 1. 先使用 Conda 建立虛擬環境： `conda env create -f /path/to/environment.yml`
 2. 啟動虛擬環境：`conda activate DL_Comp`
-3. Pip 環境應該已經包含在 `environment.yml`，因此下一步可以跳過
+3. Pip 環境應該已經包含在 `environment.yml`，因此基本上下一步可以跳過
 4. 安裝 Pip 環境：`pip install -r /path/to/requirement.txt`
 
 ## 規範
