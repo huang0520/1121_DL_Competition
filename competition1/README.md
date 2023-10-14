@@ -24,22 +24,23 @@
 下載到`./input`並讀取指定輸入檔案
 
 #### Interface
+
 輸入：
+
 ```
-out-of-core: bool
+chunk_size: int
+val_size: float，validation set 的 ratio
 ```
 
 輸出：
 
 ```
+stream: generator，用於塊狀讀取 input
+
 @dataclass
-class Dataset:
-  x_train: pd.DataFrame
-  x_val: pd.DataFrame
-  y_train: pd.DataFrame
-  y_val: pd.DataFrame
-  x_test: pd.DataFrame
-  id_test: pd.Series
+class TestSet:
+  x: pd.Series
+  id: pd.Series
 ```
 
 ### Output
@@ -47,6 +48,7 @@ class Dataset:
 將預測輸出成指定格式到`./output/`
 
 #### Interface
+
 輸入：
 
 ```
@@ -64,7 +66,9 @@ id_test: pd.Series
 除了基礎的將輸入文本 Vectorized，還有新增一些新特徵之類的功能。要建立一個調用各種功能的 Function，方便後續去選擇不同的特徵可以簡單點。
 
 #### Interface
+
 輸入：
+
 ```
 # 後續再依據需求調整
 @Dataclass
@@ -74,6 +78,7 @@ class FeatureParams:
 ```
 
 輸出：
+
 ```
 @dataclass
 class VectorizedDataset:
@@ -87,7 +92,9 @@ class VectorizedDataset:
 由於 XGBoost, CatBoost, lightGBM 並沒有支援 Partial fit，要使用 out-of-core 的方式就要把訓練好的 Weight 存起來，再下一輪再調用。因此需要建立一個簡單的調用方式來進行 Out-of-core 的訓練。
 
 #### Interface
+
 輸入：
+
 ```
 model_type:str
 
