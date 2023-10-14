@@ -73,18 +73,16 @@ id_test: pd.Series
 # 後續再依據需求調整
 @Dataclass
 class FeatureParams:
-  convert_method: str
+  hash_num: int (default: 1024)
   ...
+
+texts: pd.Series，文本數據集（e.q. x_train）
 ```
 
 輸出：
 
 ```
-@dataclass
-class VectorizedDataset:
-  x_train: pd.DataFrame
-  x_val: pd.DataFrame
-  x_test: pd.DataFrame
+pd.DataFrame，包含 Vectorized features 及另外生成的特徵
 ```
 
 ### Out-of-Core model
