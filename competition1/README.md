@@ -17,7 +17,7 @@
 
 ## 程式碼分割
 
-以下會將未來程式可能的結構切分開來，方便大家各自處理。同時也會對相互之間的 Interface 進行規範，請遵守以利後續對接。
+以下會將未來程式可能的結構切分開來，方便大家各自處理。同時也會對相互之間的 Interface 進行規範，請遵守以利後續對接。由於很有可能考慮不完全，有想調整的都歡迎提出想法。
 
 ### Input
 
@@ -61,9 +61,7 @@ id_test: pd.Series
 
 ### Feature Engineering
 
-除了基礎的將輸入文本 Vectorized，還有新增一些新特徵之類的功能。
-
-要建立一個調用各種功能的 Function，方便後續去選擇不同的特徵可以簡單點。
+除了基礎的將輸入文本 Vectorized，還有新增一些新特徵之類的功能。要建立一個調用各種功能的 Function，方便後續去選擇不同的特徵可以簡單點。
 
 #### Interface
 輸入：
@@ -84,3 +82,17 @@ class VectorizedDataset:
   x_test: pd.DataFrame
 ```
 
+### Out-of-Core model
+
+由於 XGBoost, CatBoost, lightGBM 並沒有支援 Partial fit，要使用 out-of-core 的方式就要把訓練好的 Weight 存起來，再下一輪再調用。因此需要建立一個簡單的調用方式來進行 Out-of-core 的訓練。
+
+#### Interface
+輸入：
+```
+model_type:str
+
+# 就上述模型類型要求的參數
+model_params: dict
+```
+
+輸出：訓練好的 Model
