@@ -11,6 +11,10 @@
 - `CatBoost`
 - `lightGBM`
 
+  關於 `lightGBM`，如果用 MAC 第一次安裝有可能會出問題，請去安裝 `cmake` 及 `libomp`。如果有使用 `Homebrew`，可以直接：
+
+  - `brew install cmake libomp`
+
 ## 程式碼分割
 
 以下會將未來程式可能的結構切分開來，方便大家各自處理。同時也會對相互之間的 Interface 進行規範，請遵守以利後續對接。
