@@ -1,0 +1,21 @@
+# Ignore compiled binaries
+*.class
+*.o
+*.pyc
+
+# Ignore log files
+*.log
+
+# Ignore build output
+build/
+dist/
+target/
+
+# Ignore package files
+*.jar
+*.war
+*.ear
+
+# Ignore OS-specific files
+.DS_Store
+Thumbs.db
