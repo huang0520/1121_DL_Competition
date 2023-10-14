@@ -3,6 +3,13 @@
 以下都是個人目前的建議，如果兩位覺得 OK 的話，我們就照這個去執行。
 如果有什麼想調整或建議，歡迎提出。
 
+## 各競賽相關
+
+- [Competition 1](./competition1/)
+- [Competition 2](./competition2/)
+- [Competition 3](./competition3/)
+- [Competition 4](./competition4/)
+
 ## 環境設置
 
 為了統一大家的工作環境，這邊先建好一個基礎 Conda 及 Pip 的設置文件。由於 Server 掛了，如 PyTorch, Tensorflow 需要 CUDA 的就先沒裝，第一次應該也還不用，之後再調整。
@@ -11,7 +18,8 @@
 
 1. 先使用 Conda 建立虛擬環境： `conda env create -f /path/to/environment.yml`
 2. 啟動虛擬環境：`conda activate DL_Comp`
-3. 安裝 Pip 環境：`pip install -r /path/to/requirement.txt`
+3. Pip 環境應該已經包含在 `environment.yml`，因此下一步可以跳過
+4. 安裝 Pip 環境：`pip install -r /path/to/requirement.txt`
 
 ## 規範
 
@@ -36,5 +44,3 @@
 ### 註解建議
 
 這部份不是規範，但我希望兩位要多寫點 Comment 方便之後大家去看 Code 的時候會比較容易點。然後 Jupyter 的 Markdown 功能可以多用，寫長串或是解釋整個 Block 會比 Comment 好用。
-
-## 程式分割
