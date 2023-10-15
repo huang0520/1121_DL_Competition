@@ -30,12 +30,22 @@
 ```
 chunk_size: int
 val_size: float，validation set 的 ratio
+stream: bool，是否使用 out-of-core 的形式輸出，默認為 True
 ```
 
 輸出：
 
 ```
-stream: generator，用於塊狀讀取 input
+if stream == True:
+  stream_generator，用於塊狀讀取 input
+
+if stream == False:
+  @dataclass
+  class Dataset:
+    x_train: pd.Series
+    x_val: pd.Series
+    y_train: pd.Series
+    y_val: pd.Series
 
 @dataclass
 class TestSet:
