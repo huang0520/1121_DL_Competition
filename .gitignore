@@ -12,3 +12,5 @@ model_saves/
 
 # Ignore output
 output/
+model_saves/
+catboost_info/
