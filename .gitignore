@@ -11,7 +11,8 @@ ruff.toml
 # Ignore model save
 model_saves/
 
-# Ignore output
+# Ignore folder
 output/
+input/
 model_saves/
 catboost_info/
