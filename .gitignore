@@ -16,3 +16,7 @@ output/
 input/
 model_saves/
 catboost_info/
+.git.**/
+
+# Ignore file
+bfg-1.14.0.jar
