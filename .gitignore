@@ -6,6 +6,7 @@
 Thumbs.db
 
 pyproject.toml
+ruff.toml
 
 # Ignore model save
 model_saves/
