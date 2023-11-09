@@ -1,0 +1,13 @@
+version: '1.0.0'
+
+services:
+  kernal:
+    image: env/deep_learning:latest
+    container_name: dl_kernal
+    volumes:
+      - /home/matcha0714/project/1121_Deep_Learning:/tf
+
+    ports:
+      - "8888:8888"
+
+    user: ${UID}
