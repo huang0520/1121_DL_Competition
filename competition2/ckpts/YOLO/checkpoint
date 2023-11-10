@@ -1,8 +1,0 @@
-model_checkpoint_path: "yolo-3"
-all_model_checkpoint_paths: "yolo-1"
-all_model_checkpoint_paths: "yolo-2"
-all_model_checkpoint_paths: "yolo-3"
-all_model_checkpoint_timestamps: 1699600583.5755358
-all_model_checkpoint_timestamps: 1699600703.3014507
-all_model_checkpoint_timestamps: 1699600822.9897318
-last_preserved_timestamp: 1699597751.398668
