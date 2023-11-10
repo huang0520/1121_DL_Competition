@@ -18,11 +18,11 @@ USER $USERNAME
 # Copy requirements.txt
 COPY requirements.txt /tmp/pip/requirements.txt
 
-# Install python packages
+# Install packages
 RUN pip install -r /tmp/pip/requirements.txt \
     && sudo rm -rf /tmp/pip/
 
-RUN sudo apt-get install -y vim \
+RUN sudo apt-get install -y vim ffmpeg libsm6 libxext6\
     && pip install --user pipx \
     && ~/.local/bin/pipx ensurepath \
     && echo eval "\$(register-python-argcomplete pipx)" >> ~/.bashrc
