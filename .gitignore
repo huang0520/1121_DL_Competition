@@ -14,9 +14,11 @@ model_saves/
 # Ignore folder
 output/
 input/
+data/
 model_saves/
 catboost_info/
 .git.**/
+__pycache__/
 
 # Ignore file
 bfg-1.14.0.jar
