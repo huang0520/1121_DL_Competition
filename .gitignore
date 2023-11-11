@@ -19,6 +19,7 @@ model_saves/
 catboost_info/
 .git.**/
 __pycache__/
+ckpts/
 
 # Ignore file
 bfg-1.14.0.jar
