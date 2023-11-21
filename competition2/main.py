@@ -1,4 +1,5 @@
 # %% Imports Packages
+import math
 import os
 import shutil
 import sys
@@ -36,6 +37,7 @@ NUM_CLASSES = 20
 MAX_OBJECTS_PER_IMAGE = 20
 BATCH_SIZE = 8
 NUM_IMAGES = len(open(DATA_PATH).readlines())
+NUM_AUG_IMAGES = len(open(AUG_DATA_PATH).readlines())
 
 # Model params
 CELL_SIZE = 7
@@ -46,10 +48,13 @@ CLASS_SCALE = 1
 COORD_SCALE = 5
 
 # Training params
-LEARNING_RATE = 1e-4
-EPOCHS = 100
+LEARNING_RATE = 1e-5
+EPOCHS = 40
 
 # Other params
+AUG_TARGET_NUM = 3000
+AUGMENT = False
+CONF_THRESHOLD = 0.5
 RANDOM_STATE = 417
 CLASSES_NAME = [
     "aeroplane",
@@ -74,7 +79,6 @@ CLASSES_NAME = [
     "tvmonitor",
 ]
 
-AUGMENT = False
 
 # Create directory
 if not os.path.exists(OUTPUT_DIR):
@@ -100,7 +104,7 @@ if gpus:
         print(e)
 
 
-# %%
+# %% Read data information
 # Annotation format: name x_center y_center width height class ...
 def read_data(path):
     image_names = []
@@ -124,7 +128,6 @@ def read_data(path):
 
 def analyze_data(path):
     _, bboxes_in_imgs, _ = read_data(path)
-    num_image = len(bboxes_in_imgs)
     class_count = np.zeros(NUM_CLASSES)
 
     for bboxes in bboxes_in_imgs:
@@ -135,10 +138,10 @@ def analyze_data(path):
     class_count = pd.DataFrame(
         class_count, index=CLASSES_NAME, columns=["count"], dtype=int
     )
-    return num_image, class_count
+    return class_count
 
 
-analyze_data(DATA_PATH)[1]
+analyze_data(DATA_PATH)
 
 
 # %% Image augmentation
@@ -160,8 +163,6 @@ def augment_data(augmenter, image_name, bboxes):
 
 def generate_aug_data(augmenter):
     image_names, bboxes_in_imgs, num_objs_in_imgs = read_data(DATA_PATH)
-    num_images = len(image_names)
-    bboxes_in_imgs = [bboxes[:, :5] for bboxes in bboxes_in_imgs]
     classes_in_imgs = [bboxes[:, 4].astype(int) for bboxes in bboxes_in_imgs]
 
     if os.path.exists(AUG_IMAGE_DIR):
@@ -174,17 +175,42 @@ def generate_aug_data(augmenter):
     sort_images.sort(key=lambda x: x[3])
 
     # Augment data to balance number of classes
-    NEED_CLASS_COUNT = 3000
-    images_count = np.zeros(num_images, dtype=int)
+    images_count = np.zeros(NUM_IMAGES, dtype=int)
     class_count = np.zeros(NUM_CLASSES, dtype=int)
     file_write = open(AUG_DATA_PATH, "w")
 
+    # Add original data to file
+    for i, (image_name, bboxes, classes, _) in tqdm(
+        enumerate(sort_images), desc="Original", total=len(sort_images)
+    ):
+        if any(class_count > AUG_TARGET_NUM):
+            continue
+        img_idx = image_names.index(image_name)
+
+        # Write to file
+        label = [f"{images_count[img_idx]}_{image_name}"] + [
+            str(int(b)) for bboxes in bboxes for b in bboxes
+        ]
+        if label[0].split("_")[1] != image_name:
+            continue
+
+        img = tf.io.read_file(IMAGE_DIR + image_name)
+
+        file_write.write(" ".join(label) + "\n")
+        tf.io.write_file(
+            AUG_IMAGE_DIR + f"{images_count[img_idx]}_{image_name}", img.numpy()
+        )
+
+        images_count[img_idx] += 1
+        for _class in classes:
+            class_count[_class] += 1
+
     aug_list = sort_images
-    while any(class_count < NEED_CLASS_COUNT):
+    while any(class_count < AUG_TARGET_NUM):
         # Put image with not enough class to the end of list
         tmp_list = []
         for i, (image_name, _, classes, _) in enumerate(aug_list):
-            if all(class_count[classes] < NEED_CLASS_COUNT):
+            if all(class_count[classes] < AUG_TARGET_NUM):
                 tmp_list.append(aug_list[i])
                 for _class in classes:
                     class_count[_class] += 1
@@ -195,7 +221,6 @@ def generate_aug_data(augmenter):
             enumerate(aug_list), desc="Augment", total=len(aug_list)
         ):
             img_idx = image_names.index(image_name)
-            images_count[img_idx] += 1
 
             # Generate augment image
             img_augmented, bboxes_augmented = augment_data(
@@ -206,12 +231,16 @@ def generate_aug_data(augmenter):
             aug_label = [f"{images_count[img_idx]}_{image_name}"] + [
                 str(int(b)) for bboxes in bboxes_augmented for b in bboxes
             ]
-            file_write.write(" ".join(aug_label) + "\n")
+            if aug_label[0].split("_")[1] != image_name:
+                continue
 
+            file_write.write(" ".join(aug_label) + "\n")
             tf.io.write_file(
                 AUG_IMAGE_DIR + f"{images_count[img_idx]}_{image_name}",
                 img_augmented,
             )
+
+            images_count[img_idx] += 1
 
     file_write.close()
 
@@ -253,11 +282,10 @@ augmenter = A.Compose(
 
 if AUGMENT:
     generate_aug_data(augmenter)
+    NUM_AUG_IMAGES = len(open(AUG_DATA_PATH).readlines())
 
 # %% Analyze augmented data
-num_aug_img, class_count = analyze_data(AUG_DATA_PATH)
-print(num_aug_img)
-print(class_count)
+analyze_data(AUG_DATA_PATH)
 
 
 # %% Dataset loader
@@ -340,7 +368,7 @@ class DatasetGenerator:
                 np.array(self.object_num_list),
             )
         )
-        dataset = dataset.shuffle(50000)
+        dataset = dataset.shuffle(NUM_AUG_IMAGES + 2000)
         dataset = dataset.map(
             self._data_preprocess, num_parallel_calls=tf.data.experimental.AUTOTUNE
         )
@@ -365,58 +393,15 @@ def Conv2D_BN_Leaky(x, filters, size, stride=1):
     return x
 
 
-def Convset(x, filters):
-    x = Conv2D_BN_Leaky(x, filters, 1)
-    x = Conv2D_BN_Leaky(x, filters * 2, 3)
-    x = Conv2D_BN_Leaky(x, filters, 1)
-    return x
-
-
 def yolo_body(input):
-    # base_model = keras.applications.EfficientNetV2M(
-    #     input_tensor=input, include_top=False, weights="imagenet"
-    # )
-    # base_model.trainable = False
-
-    # x = base_model.output
-    # Spitial Pyramid Pooling
-    # x = Convset(base_model.output, 512)
-    # maxpool1 = layers.MaxPooling2D(pool_size=(13, 13), strides=(1, 1), padding="same")(
-    #     x
-    # )
-    # maxpool2 = layers.MaxPooling2D(pool_size=(9, 9), strides=(1, 1), padding="same")(x)
-    # maxpool3 = layers.MaxPooling2D(pool_size=(5, 5), strides=(1, 1), padding="same")(x)
-    # x = layers.Concatenate()([maxpool1, maxpool2, maxpool3, x])
-    # x = Convset(x, 512)
-
-    x = Conv2D_BN_Leaky(input, 64, 7, 2)
-    x = layers.MaxPool2D()(x)
-    x = Conv2D_BN_Leaky(x, 192, 3, 1)
-    x = layers.MaxPool2D()(x)
-    x = Conv2D_BN_Leaky(x, 128, 1, 1)
-    x = Conv2D_BN_Leaky(x, 256, 3, 1)
-    x = Conv2D_BN_Leaky(x, 256, 1, 1)
-    x = Conv2D_BN_Leaky(x, 512, 3, 1)
-    x = layers.MaxPool2D()(x)
-    x = Conv2D_BN_Leaky(x, 256, 1, 1)
-    x = Conv2D_BN_Leaky(x, 512, 3, 1)
-    x = Conv2D_BN_Leaky(x, 256, 1, 1)
-    x = Conv2D_BN_Leaky(x, 512, 3, 1)
-    x = Conv2D_BN_Leaky(x, 256, 1, 1)
-    x = Conv2D_BN_Leaky(x, 512, 3, 1)
-    x = Conv2D_BN_Leaky(x, 256, 1, 1)
-    x = Conv2D_BN_Leaky(x, 512, 3, 1)
-    x = Conv2D_BN_Leaky(x, 512, 1, 1)
-    x = Conv2D_BN_Leaky(x, 1024, 3, 1)
-    x = layers.MaxPool2D()(x)
-    x = Conv2D_BN_Leaky(x, 512, 1, 1)
-    x = Conv2D_BN_Leaky(x, 1024, 3, 1)
-    x = Conv2D_BN_Leaky(x, 512, 1, 1)
-    x = Conv2D_BN_Leaky(x, 1024, 3, 1)
-    x = Conv2D_BN_Leaky(x, 1024, 3, 1)
+    base_model = keras.applications.EfficientNetV2S(
+        input_tensor=input, include_top=False, weights="imagenet"
+    )
+    x = Conv2D_BN_Leaky(base_model.output, 1024, 3, 1)
     x = Conv2D_BN_Leaky(x, 1024, 3, 2)
     x = Conv2D_BN_Leaky(x, 1024, 3, 1)
     x = Conv2D_BN_Leaky(x, 1024, 3, 1)
+
     x = layers.Flatten()(x)
     x = layers.Dense(
         4096, kernel_initializer=tf.keras.initializers.TruncatedNormal(stddev=0.01)
@@ -433,7 +418,7 @@ def yolo_body(input):
 YOLO = yolo_body(keras.Input(shape=(IMAGE_SIZE, IMAGE_SIZE, 3)))
 YOLO.summary()
 
-# %% Define base boxes
+# %% Define loss function
 # base boxes (for loss calculation)
 base_boxes = np.zeros([CELL_SIZE, CELL_SIZE, 4])
 
@@ -451,35 +436,6 @@ base_boxes = np.resize(base_boxes, [CELL_SIZE, CELL_SIZE, 1, 4])
 base_boxes = np.tile(base_boxes, [1, 1, BOXES_PER_CELL, 1])
 
 
-# %% Define loss function
-def yolo_loss(predicts, labels, objects_num):
-    """
-    Add Loss to all the trainable variables
-    Args:
-        predicts: 4-D tensor [batch_size, cell_size, cell_size, num_classes + 5 * boxes_per_cell]
-        ===> (num_classes, boxes_per_cell, 4 * boxes_per_cell)
-        labels  : 3-D tensor of [batch_size, max_objects, 5]
-        objects_num: 1-D tensor [batch_size]
-    """
-
-    loss = 0.0
-    batch_size = predicts.shape[0]
-
-    # you can parallel the code with tf.map_fn or tf.vectorized_map (big performance gain!)
-
-    for i in tf.range(batch_size):
-        predict = predicts[i, :, :, :]
-        label = labels[i, :, :]
-        object_num = objects_num[i]
-
-        for j in tf.range(object_num):
-            results = losses_calculation(predict, label[j : j + 1, :])
-            loss = loss + results
-
-    return loss / batch_size
-
-
-# %%
 def iou(boxes1, boxes2):
     """calculate ious
     Args:
@@ -545,7 +501,7 @@ def losses_calculation(predict, label):
     calculate loss
     Args:
       predict: 3-D tensor [cell_size, cell_size, num_classes + 5 * boxes_per_cell]
-      label : [1, 5]  (x_center, y_center, w, h, class)
+      label :  [1, 5]  (x_center, y_center, w, h, class)
     """
     label = tf.reshape(label, [-1])
 
@@ -677,15 +633,44 @@ def losses_calculation(predict, label):
     return class_loss + object_loss + noobject_loss + coord_loss
 
 
+def yolo_loss(predicts, labels, objects_num):
+    """
+    Add Loss to all the trainable variables
+    Args:
+        predicts:    4-D tensor [batch_size, cell_size, cell_size, num_classes + 5 * boxes_per_cell]
+                     ===> (num_classes, boxes_per_cell, 4 * boxes_per_cell)
+        labels:      3-D tensor of [batch_size, max_objects, 5]
+        objects_num: 1-D tensor [batch_size]
+    """
+
+    loss = 0.0
+    batch_size = len(predicts)
+    # you can parallel the code with tf.map_fn or tf.vectorized_map (big performance gain!)
+    for i in tf.range(batch_size):
+        predict = predicts[i, :, :, :]
+        label = labels[i, :, :]
+        object_num = objects_num[i]
+
+        for j in tf.range(object_num):
+            loss = loss + losses_calculation(predict, label[j : j + 1, :])
+
+    return loss / batch_size
+
+
 # %% Training setup
 dataset = DatasetGenerator().generate()
 optimizer = tf.keras.optimizers.Adam(LEARNING_RATE)
 train_loss_metric = tf.keras.metrics.Mean(name="loss")
-ckpt = tf.train.Checkpoint(epoch=tf.Variable(0), net=YOLO)
 
+ckpt = tf.train.Checkpoint(epoch=tf.Variable(0), net=YOLO)
 manager = tf.train.CheckpointManager(
     ckpt, "./ckpts/YOLO", max_to_keep=3, checkpoint_name="yolo"
 )
+ckpt_path = manager.restore_or_initialize()
+if ckpt_path:
+    print(f"Restored from {ckpt_path}")
+else:
+    print("Initializing from scratch.")
 
 
 # %% Training step
@@ -710,22 +695,18 @@ def train_step(image, labels, objects_num):
 # %% Training
 print("{}, start training.".format(datetime.now()))
 for i in range(EPOCHS):
-    train_loss_metric.reset_state()
+    train_loss_metric.reset_states()
     ckpt.epoch.assign_add(1)
 
-    for idx, (image, labels, objects_num) in tqdm(
-        enumerate(dataset), desc=f"Epoch {i+1}", total=num_aug_img // BATCH_SIZE
+    for image, labels, objects_num in tqdm(
+        dataset, desc=f"Epoch {i+1}", total=int(math.ceil(NUM_AUG_IMAGES // BATCH_SIZE))
     ):
         train_step(image, labels, objects_num)
 
-    print(
-        "{}, Epoch {}: loss {:.2f}".format(
-            datetime.now(), i + 1, train_loss_metric.result()
-        )
-    )
+    print(f"Epoch {i+1}: Average loss {train_loss_metric.result():.2f}")
 
     save_path = manager.save()
-    print("Saved checkpoint for epoch {}: {}".format(int(ckpt.epoch), save_path))
+    print(f"Saved checkpoint for epoch {int(ckpt.epoch)}: {save_path}")
 
 
 # %% Function for process model prediction
@@ -751,36 +732,36 @@ def process_outputs(outputs):
     P = C * p_classes
     # P's shape [7, 7, 2, 20]
 
-    # choose the most confidence one
-    max_conf = np.max(P)
-    index = np.argmax(P)
+    # Choose the one which confidence > threshold
+    conf_mask = P >= np.max(P) * CONF_THRESHOLD
+    confs = P[conf_mask]
+    indexs = np.nonzero(conf_mask)
 
-    index = np.unravel_index(index, P.shape)
-
-    class_num = index[3]
+    class_nums = indexs[3]
 
     coordinate = np.reshape(coordinate, (CELL_SIZE, CELL_SIZE, BOXES_PER_CELL, 4))
 
-    max_coordinate = coordinate[index[0], index[1], index[2], :]
+    coordinates = coordinate[indexs[0], indexs[1], indexs[2], :]
 
-    xcenter = max_coordinate[0]
-    ycenter = max_coordinate[1]
-    w = max_coordinate[2]
-    h = max_coordinate[3]
+    xs, ys, ws, hs = (
+        coordinates[:, 0],
+        coordinates[:, 1],
+        coordinates[:, 2],
+        coordinates[:, 3],
+    )
 
-    xcenter = (index[1] + xcenter) * (IMAGE_SIZE / float(CELL_SIZE))
-    ycenter = (index[0] + ycenter) * (IMAGE_SIZE / float(CELL_SIZE))
+    xs = (xs + indexs[1]) * (IMAGE_SIZE / float(CELL_SIZE))
+    ys = (ys + indexs[0]) * (IMAGE_SIZE / float(CELL_SIZE))
+    ws = ws * IMAGE_SIZE
+    hs = hs * IMAGE_SIZE
 
-    w = w * IMAGE_SIZE
-    h = h * IMAGE_SIZE
+    xmins = xs - ws / 2.0
+    ymins = ys - hs / 2.0
 
-    xmin = xcenter - w / 2.0
-    ymin = ycenter - h / 2.0
+    xmaxs = xmins + ws
+    ymaxs = ymins + hs
 
-    xmax = xmin + w
-    ymax = ymin + h
-
-    return xmin, ymin, xmax, ymax, class_num, max_conf
+    return xmins, ymins, xmaxs, ymaxs, class_nums, confs
 
 
 # %% Build test dataset iterator
@@ -804,7 +785,7 @@ def load_img_data(image_name):
     w = tf.shape(image)[1]
 
     image = tf.image.resize(image, size=[IMAGE_SIZE, IMAGE_SIZE])
-    image = (image / 255) * 2 - 1
+    image = image / 255
 
     return image_name, image, h, w
 
@@ -824,26 +805,30 @@ def prediction_step(img):
 # %% Prediction
 output_file = open(os.path.join(OUTPUT_DIR, "test_prediction.txt"), "w")
 ckpt = tf.train.Checkpoint(net=YOLO)
-ckpt.restore(f"./ckpts/YOLO/yolo-{EPOCHS}")
+ckpt.restore("./ckpts/YOLO/yolo-40")
 
 for img_name, test_img, img_h, img_w in test_dataset:
     batch_num = img_name.shape[0]
     for i in range(batch_num):
-        xmin, ymin, xmax, ymax, class_num, conf = process_outputs(
+        xmins, ymins, xmaxs, ymaxs, class_nums, confs = process_outputs(
             prediction_step(test_img[i : i + 1])
         )
-        xmin, ymin, xmax, ymax = (
-            xmin * (img_w[i : i + 1] / IMAGE_SIZE),
-            ymin * (img_h[i : i + 1] / IMAGE_SIZE),
-            xmax * (img_w[i : i + 1] / IMAGE_SIZE),
-            ymax * (img_h[i : i + 1] / IMAGE_SIZE),
+        bbox_coords = (
+            xmins * (img_w[i : i + 1] / IMAGE_SIZE),
+            ymins * (img_h[i : i + 1] / IMAGE_SIZE),
+            xmaxs * (img_w[i : i + 1] / IMAGE_SIZE),
+            ymaxs * (img_h[i : i + 1] / IMAGE_SIZE),
         )
 
+        bbox_coords = tf.transpose(bbox_coords)
+
         # img filename, xmin, ymin, xmax, ymax, class, confidence
-        output_file.write(
-            img_name[i : i + 1].numpy()[0].decode("ascii")
-            + " %d %d %d %d %d %f\n" % (xmin, ymin, xmax, ymax, class_num, conf)
-        )
+        for coord, class_num, conf in zip(bbox_coords, class_nums, confs):
+            output_file.write(
+                img_name[i : i + 1].numpy()[0].decode("ascii")
+                + " %d %d %d %d %d %f\n"
+                % (coord[0], coord[1], coord[2], coord[3], class_num, conf)
+            )
 
 output_file.close()
 
@@ -853,24 +838,30 @@ evaluate.evaluate(
     os.path.join(OUTPUT_DIR, "output.csv"),
 )
 
+cap = pd.read_csv("./output/output.csv")["packedCAP"]
+print("score: {:f}".format(sum((1.0 - cap) ** 2) / len(cap)))
+
 # %% Visualize
 np_img = cv2.imread(
-    os.path.join(DATA_DIR, "VOCdevkit_test/VOC2007/JPEGImages/000011.jpg")
+    os.path.join(DATA_DIR, "VOCdevkit_test/VOC2007/JPEGImages/000001.jpg")
 )
 resized_img = cv2.resize(np_img, (IMAGE_SIZE, IMAGE_SIZE))
 np_img = cv2.cvtColor(resized_img, cv2.COLOR_BGR2RGB)
 resized_img = np_img
 np_img = np_img.astype(np.float32)
-np_img = np_img / 255.0 * 2 - 1
+np_img = np_img / 255.0
 np_img = np.reshape(np_img, (1, IMAGE_SIZE, IMAGE_SIZE, 3))
 
 y_pred = YOLO(np_img, training=False)
-xmin, ymin, xmax, ymax, class_num, conf = process_outputs(y_pred)
-class_name = CLASSES_NAME[class_num]
-cv2.rectangle(
-    resized_img, (int(xmin), int(ymin)), (int(xmax), int(ymax)), (0, 255, 255), 3
-)
-cv2.putText(resized_img, class_name, (0, 200), 2, 1.5, (0, 255, 255), 2)
+xmins, ymins, xmaxs, ymaxs, class_nums, confs = process_outputs(y_pred)
+out = zip(xmins, ymins, xmaxs, ymaxs, class_nums, confs)
+
+for xmin, ymin, xmax, ymax, class_num, conf in out:
+    class_name = CLASSES_NAME[class_num]
+    cv2.rectangle(
+        resized_img, (int(xmin), int(ymin)), (int(xmax), int(ymax)), (0, 255, 255), 3
+    )
+    cv2.putText(resized_img, class_name, (0, 200), 2, 1.5, (0, 255, 255), 2)
 
 plt.imshow(resized_img)
 plt.show()

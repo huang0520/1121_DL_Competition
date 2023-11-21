@@ -1,11 +1,8 @@
-numpy
-scipy
 pandas
-scikit-learn
 matplotlib
 seaborn
-dill
 tqdm
-notebook
+ipykernel
 opencv-python
 cryptography
+albumentations
