@@ -5,6 +5,10 @@ import shutil
 import sys
 import warnings
 from datetime import datetime
+from random import shuffle
+
+from matplotlib.pylab import f
+from requests import get
 
 sys.path.insert(0, "./evaluate")
 warnings.filterwarnings("ignore")
@@ -48,14 +52,13 @@ CLASS_SCALE = 1
 COORD_SCALE = 5
 
 # Training params
-LEARNING_RATE = 1e-5
-EPOCHS = 40
+LEARNING_RATE = 7e-6
+EPOCHS = 20
 
 # Other params
 AUG_TARGET_NUM = 3000
 AUGMENT = False
-CONF_THRESHOLD = 0.5
-RANDOM_STATE = 417
+CONF_THRESHOLD = 0.3
 CLASSES_NAME = [
     "aeroplane",
     "bicycle",
@@ -113,7 +116,7 @@ def read_data(path):
 
     with open(path, "r") as input_file:
         for line in input_file:
-            line_split = line.strip().split(" ")
+            line_split = line.split(" ")
             image_names.append(line_split[0])
             record = [float(num) for num in line_split[1:]]
             if len(record) > MAX_OBJECTS_PER_IMAGE * 5:
@@ -145,137 +148,157 @@ analyze_data(DATA_PATH)
 
 
 # %% Image augmentation
-def augment_data(augmenter, image_name, bboxes):
-    img_file = tf.io.read_file(IMAGE_DIR + image_name)
-    img = tf.io.decode_jpeg(img_file, channels=3)
+def get_balanced_aug_list(image_names, bboxes_in_imgs):
+    image_names, bboxes_in_imgs, _ = read_data(DATA_PATH)
 
-    data = {"image": img.numpy(), "bboxes": bboxes}
-    augmented = augmenter(**data)
+    # Build image_name to index dict
+    name_to_idx = {image_name: i for i, image_name in enumerate(image_names)}
 
-    img_augmented = augmented["image"]
-    bboxes_augmented = augmented["bboxes"]
+    # Shuffle data
+    random_images = list(zip(image_names, bboxes_in_imgs))
+    shuffle(random_images)
 
-    img_augmented = tf.cast(img_augmented, tf.uint8)
-    img_augmented = tf.io.encode_jpeg(img_augmented)
+    class_count = np.zeros(NUM_CLASSES, dtype=int)
+    image_count = np.zeros(NUM_IMAGES, dtype=int)
+    invalid_idx = np.zeros(len(random_images), dtype=bool)
 
-    return img_augmented, bboxes_augmented
+    aug_names = []
+    aug_bboxes = []
+    while any(class_count < AUG_TARGET_NUM):
+        for i, (image_name, bboxes) in enumerate(random_images):
+            # Only take max 8 class per image
+            # if len(bboxes) > 8:
+            #     np.random.shuffle(bboxes)
+            #     bboxes = bboxes[:8, ...]
+
+            classes = bboxes[:, 4].astype(int)
+            if not invalid_idx[i] and all(class_count[classes] < AUG_TARGET_NUM):
+                idx = name_to_idx[image_name]
+                for cls in bboxes[:, 4].astype(int):
+                    class_count[cls] += 1
+
+                aug_name = f"{image_count[idx]}_{image_name}"
+                aug_names.append(aug_name)
+                aug_bboxes.append(bboxes)
+
+                image_count[idx] += 1
+            else:
+                invalid_idx[i] = True
+
+    return aug_names, aug_bboxes, name_to_idx
+
+
+def mosaic_augment_data(images, bboxes_in_imgs):
+    crop_imgs = []
+    crop_bboxes = []
+    for i, (image, bboxes) in enumerate(zip(images, bboxes_in_imgs)):
+        data = {"image": image, "bboxes": bboxes}
+        resizer = A.Compose(
+            [
+                A.Resize(IMAGE_SIZE // 2, IMAGE_SIZE // 2),
+            ],
+            bbox_params=A.BboxParams(format="pascal_voc", min_visibility=0.25),
+        )
+        aug_data = resizer(**data)
+
+        crop_imgs.append(aug_data["image"])
+
+        # Move bboxes
+        bboxes = np.array(aug_data["bboxes"])
+        if bboxes.shape[0] == 0:
+            continue
+
+        bboxes[:, 0] += IMAGE_SIZE // 2 * (i % 2)
+        bboxes[:, 1] += IMAGE_SIZE // 2 * (i // 2)
+        bboxes[:, 2] += IMAGE_SIZE // 2 * (i % 2)
+        bboxes[:, 3] += IMAGE_SIZE // 2 * (i // 2)
+
+        crop_bboxes.append(bboxes.astype(int))
+
+    crop_imgs = np.array(crop_imgs).reshape(2, 2, IMAGE_SIZE // 2, IMAGE_SIZE // 2, 3)
+    concat_bboxes = np.concatenate(crop_bboxes, axis=0) if crop_bboxes else np.array([])
+
+    concat_img = np.concatenate(
+        [
+            np.concatenate(crop_imgs[0], axis=1),
+            np.concatenate(crop_imgs[1], axis=1),
+        ],
+        axis=0,
+    )
+
+    return concat_img, concat_bboxes
 
 
 def generate_aug_data(augmenter):
-    image_names, bboxes_in_imgs, num_objs_in_imgs = read_data(DATA_PATH)
-    classes_in_imgs = [bboxes[:, 4].astype(int) for bboxes in bboxes_in_imgs]
+    image_names, bboxes_in_imgs, _ = read_data(DATA_PATH)
 
     if os.path.exists(AUG_IMAGE_DIR):
         shutil.rmtree(AUG_IMAGE_DIR)
+    os.makedirs(AUG_IMAGE_DIR)
 
-    # Sort image names by number of objects in image
-    sort_images = list(
-        zip(image_names, bboxes_in_imgs, classes_in_imgs, num_objs_in_imgs)
+    aug_names, aug_bboxes, name_to_idx = get_balanced_aug_list(
+        image_names, bboxes_in_imgs
     )
-    sort_images.sort(key=lambda x: x[3])
 
-    # Augment data to balance number of classes
-    images_count = np.zeros(NUM_IMAGES, dtype=int)
-    class_count = np.zeros(NUM_CLASSES, dtype=int)
+    # Augment data
+    mosaic_wait = []
     file_write = open(AUG_DATA_PATH, "w")
-
-    # Add original data to file
-    for i, (image_name, bboxes, classes, _) in tqdm(
-        enumerate(sort_images), desc="Original", total=len(sort_images)
+    for i, (name, bboxes) in enumerate(
+        tqdm(zip(aug_names, aug_bboxes), desc="Augment", total=len(aug_names))
     ):
-        if any(class_count > AUG_TARGET_NUM):
-            continue
-        img_idx = image_names.index(image_name)
+        idx, image_name = name.split("_")
+        np_img = plt.imread(IMAGE_DIR + image_name)
 
-        # Write to file
-        label = [f"{images_count[img_idx]}_{image_name}"] + [
-            str(int(b)) for bboxes in bboxes for b in bboxes
-        ]
-        if label[0].split("_")[1] != image_name:
-            continue
+        if int(idx) == 0:
+            mosaic_wait.append((np_img, bboxes))
 
-        img = tf.io.read_file(IMAGE_DIR + image_name)
+        else:
+            data = {"image": np_img, "bboxes": bboxes}
+            data_aug = augmenter(**data)
 
-        file_write.write(" ".join(label) + "\n")
-        tf.io.write_file(
-            AUG_IMAGE_DIR + f"{images_count[img_idx]}_{image_name}", img.numpy()
-        )
+            np_img_aug = data_aug["image"]
+            bboxes_aug = np.array(data_aug["bboxes"])
 
-        images_count[img_idx] += 1
-        for _class in classes:
-            class_count[_class] += 1
+            mosaic_wait.append((np_img_aug, bboxes_aug))
 
-    aug_list = sort_images
-    while any(class_count < AUG_TARGET_NUM):
-        # Put image with not enough class to the end of list
-        tmp_list = []
-        for i, (image_name, _, classes, _) in enumerate(aug_list):
-            if all(class_count[classes] < AUG_TARGET_NUM):
-                tmp_list.append(aug_list[i])
-                for _class in classes:
-                    class_count[_class] += 1
+        # Mosaic augment
+        # if len(mosaic_wait) == 4:
+        #     np_img_mosaic, bboxes_mosaic = mosaic_augment_data(*zip(*mosaic_wait))
+        #     bboxes_mosaic = bboxes_mosaic.ravel()
+        #     mosaic_wait = []
 
-        # Augment image
-        aug_list = tmp_list
-        for i, (image_name, bboxes, classes, _) in tqdm(
-            enumerate(aug_list), desc="Augment", total=len(aug_list)
-        ):
-            img_idx = image_names.index(image_name)
+        #     # Save image
+        #     file_name = f"{i // 4}.jpg"
+        #     aug_label = [file_name] + [str(b) for b in bboxes_mosaic]
 
-            # Generate augment image
-            img_augmented, bboxes_augmented = augment_data(
-                augmenter, image_name, bboxes
-            )
+        #     file_write.write(" ".join(aug_label) + "\n")
+        #     plt.imsave(AUG_IMAGE_DIR + file_name, np_img_mosaic)
 
-            # Write to file
-            aug_label = [f"{images_count[img_idx]}_{image_name}"] + [
-                str(int(b)) for bboxes in bboxes_augmented for b in bboxes
-            ]
-            if aug_label[0].split("_")[1] != image_name:
-                continue
+        # No mosaic augment
+        np_img, bboxes = mosaic_wait[-1]
+        mosaic_wait = []
 
-            file_write.write(" ".join(aug_label) + "\n")
-            tf.io.write_file(
-                AUG_IMAGE_DIR + f"{images_count[img_idx]}_{image_name}",
-                img_augmented,
-            )
+        file_name = name
+        aug_label = [file_name] + [str(b) for b in bboxes.ravel()]
 
-            images_count[img_idx] += 1
+        file_write.write(" ".join(aug_label) + "\n")
+        plt.imsave(AUG_IMAGE_DIR + file_name, np_img)
 
     file_write.close()
 
 
 augmenter = A.Compose(
     [
-        A.RandomRotate90(),
-        A.Flip(),
-        A.Transpose(),
-        A.GaussNoise(),
-        A.OneOf(
-            [
-                A.MotionBlur(p=0.2),
-                A.MedianBlur(blur_limit=3, p=0.1),
-                A.Blur(blur_limit=3, p=0.1),
-            ]
-        ),
-        A.ShiftScaleRotate(),
-        A.OneOf(
-            [
-                A.OpticalDistortion(p=0.3),
-                A.GridDistortion(p=0.1),
-                A.PiecewiseAffine(p=0.3),
-            ]
-        ),
-        A.OneOf(
-            [
-                A.CLAHE(clip_limit=2),
-                A.Sharpen(),
-                A.Emboss(),
-                A.RandomBrightnessContrast(),
-            ]
-        ),
-        A.JpegCompression(quality_lower=85, quality_upper=100, p=0.5),
+        # Pixel-level
+        A.ISONoise(),
         A.HueSaturationValue(),
+        A.InvertImg(p=0.2),
+        A.JpegCompression(quality_lower=85, quality_upper=100, p=0.8),
+        # Spatial-level
+        A.RandomRotate90(p=0.75),
+        A.Flip(),
+        A.GridDistortion(),
+        A.PiecewiseAffine(),
     ],
     bbox_params=A.BboxParams(format="pascal_voc"),
 )
@@ -283,6 +306,7 @@ augmenter = A.Compose(
 if AUGMENT:
     generate_aug_data(augmenter)
     NUM_AUG_IMAGES = len(open(AUG_DATA_PATH).readlines())
+
 
 # %% Analyze augmented data
 analyze_data(AUG_DATA_PATH)
@@ -340,7 +364,7 @@ class DatasetGenerator:
         height_ratio = IMAGE_SIZE * 1.0 / tf.cast(h, tf.float32)
 
         image = tf.image.resize(image, size=[IMAGE_SIZE, IMAGE_SIZE])
-        image = image / 255
+        image = (image / 255) * 2 - 1
 
         raw_labels = tf.cast(tf.reshape(raw_labels, [-1, 5]), tf.float32)
 
@@ -395,7 +419,10 @@ def Conv2D_BN_Leaky(x, filters, size, stride=1):
 
 def yolo_body(input):
     base_model = keras.applications.EfficientNetV2S(
-        input_tensor=input, include_top=False, weights="imagenet"
+        weights="imagenet",
+        include_top=False,
+        input_tensor=input,
+        include_preprocessing=False,
     )
     x = Conv2D_BN_Leaky(base_model.output, 1024, 3, 1)
     x = Conv2D_BN_Leaky(x, 1024, 3, 2)
@@ -642,10 +669,9 @@ def yolo_loss(predicts, labels, objects_num):
         labels:      3-D tensor of [batch_size, max_objects, 5]
         objects_num: 1-D tensor [batch_size]
     """
-
     loss = 0.0
     batch_size = len(predicts)
-    # you can parallel the code with tf.map_fn or tf.vectorized_map (big performance gain!)
+
     for i in tf.range(batch_size):
         predict = predicts[i, :, :, :]
         label = labels[i, :, :]
@@ -659,8 +685,12 @@ def yolo_loss(predicts, labels, objects_num):
 
 # %% Training setup
 dataset = DatasetGenerator().generate()
+train_dataset = dataset.take(int(math.ceil(NUM_AUG_IMAGES * 0.9 / BATCH_SIZE)))
+val_dataset = dataset.skip(int(math.ceil(NUM_AUG_IMAGES * 0.9 / BATCH_SIZE)))
+
 optimizer = tf.keras.optimizers.Adam(LEARNING_RATE)
 train_loss_metric = tf.keras.metrics.Mean(name="loss")
+val_loss_metric = tf.keras.metrics.Mean(name="val_loss")
 
 ckpt = tf.train.Checkpoint(epoch=tf.Variable(0), net=YOLO)
 manager = tf.train.CheckpointManager(
@@ -692,21 +722,54 @@ def train_step(image, labels, objects_num):
     optimizer.apply_gradients(zip(grads, YOLO.trainable_weights))
 
 
+def val_step(image, labels, objects_num):
+    output = YOLO(image, training=False)
+    class_end = CELL_SIZE * CELL_SIZE * NUM_CLASSES
+    conf_end = class_end + CELL_SIZE * CELL_SIZE * BOXES_PER_CELL
+    class_probs = tf.reshape(output[:, 0:class_end], (-1, 7, 7, 20))
+    confs = tf.reshape(output[:, class_end:conf_end], (-1, 7, 7, 2))
+    boxes = tf.reshape(output[:, conf_end:], (-1, 7, 7, 2 * 4))
+    predicts = tf.concat([class_probs, confs, boxes], 3)
+
+    loss = yolo_loss(predicts, labels, objects_num)
+    val_loss_metric(loss)
+
+
 # %% Training
 print("{}, start training.".format(datetime.now()))
+min_val_loss = np.inf
+early_stop_counter = 0
+
 for i in range(EPOCHS):
     train_loss_metric.reset_states()
     ckpt.epoch.assign_add(1)
+    ckpt_counter = int(ckpt.epoch)
 
-    for image, labels, objects_num in tqdm(
-        dataset, desc=f"Epoch {i+1}", total=int(math.ceil(NUM_AUG_IMAGES // BATCH_SIZE))
-    ):
+    print(f"Epoch {ckpt_counter}")
+    for image, labels, objects_num in tqdm(train_dataset, desc="Training"):
         train_step(image, labels, objects_num)
 
-    print(f"Epoch {i+1}: Average loss {train_loss_metric.result():.2f}")
+    for image, labels, objects_num in tqdm(val_dataset, desc="Validation"):
+        val_step(image, labels, objects_num)
+
+    print(
+        f"Epoch {ckpt_counter}: Train loss {train_loss_metric.result():.2f}", end=", "
+    )
+    print(f"Val loss {val_loss_metric.result():.2f}")
 
     save_path = manager.save()
-    print(f"Saved checkpoint for epoch {int(ckpt.epoch)}: {save_path}")
+    print(f"Saved checkpoint for epoch {ckpt_counter}: {save_path}")
+
+    # Early stopping
+    min_val_loss = min(min_val_loss, val_loss_metric.result())
+    if val_loss_metric.result() > min_val_loss:
+        early_stop_counter += 1
+    else:
+        early_stop_counter = 0
+
+    if early_stop_counter >= 2:
+        print("Early stopping...")
+        break
 
 
 # %% Function for process model prediction
@@ -785,7 +848,7 @@ def load_img_data(image_name):
     w = tf.shape(image)[1]
 
     image = tf.image.resize(image, size=[IMAGE_SIZE, IMAGE_SIZE])
-    image = image / 255
+    image = (image / 255) * 2 - 1
 
     return image_name, image, h, w
 
@@ -805,32 +868,31 @@ def prediction_step(img):
 # %% Prediction
 output_file = open(os.path.join(OUTPUT_DIR, "test_prediction.txt"), "w")
 ckpt = tf.train.Checkpoint(net=YOLO)
-ckpt.restore("./ckpts/YOLO/yolo-40")
+manager = tf.train.CheckpointManager(
+    ckpt, "./ckpts/YOLO", max_to_keep=3, checkpoint_name="yolo"
+)
+ckpt_path = manager.restore_or_initialize()
+print(f"Restored from {ckpt_path}")
 
-for img_name, test_img, img_h, img_w in test_dataset:
-    batch_num = img_name.shape[0]
-    for i in range(batch_num):
-        xmins, ymins, xmaxs, ymaxs, class_nums, confs = process_outputs(
-            prediction_step(test_img[i : i + 1])
-        )
-        bbox_coords = (
-            xmins * (img_w[i : i + 1] / IMAGE_SIZE),
-            ymins * (img_h[i : i + 1] / IMAGE_SIZE),
-            xmaxs * (img_w[i : i + 1] / IMAGE_SIZE),
-            ymaxs * (img_h[i : i + 1] / IMAGE_SIZE),
-        )
+file_write = open(os.path.join(OUTPUT_DIR, "test_prediction.txt"), "w")
 
-        bbox_coords = tf.transpose(bbox_coords)
+for img_name, test_img, img_h, img_w in tqdm(test_dataset, desc="Prediction"):
+    batch_size = img_name.shape[0]
+    for i in range(batch_size):
+        out = process_outputs(prediction_step(test_img[i : i + 1]))
+        out = zip(*out)
 
-        # img filename, xmin, ymin, xmax, ymax, class, confidence
-        for coord, class_num, conf in zip(bbox_coords, class_nums, confs):
-            output_file.write(
-                img_name[i : i + 1].numpy()[0].decode("ascii")
-                + " %d %d %d %d %d %f\n"
-                % (coord[0], coord[1], coord[2], coord[3], class_num, conf)
+        for xmin, ymin, xmax, ymax, class_num, conf in out:
+            xmin = xmin * (img_w[i] / IMAGE_SIZE)
+            ymin = ymin * (img_h[i] / IMAGE_SIZE)
+            xmax = xmax * (img_w[i] / IMAGE_SIZE)
+            ymax = ymax * (img_h[i] / IMAGE_SIZE)
+            file_write.write(
+                img_name[i].numpy().decode("ascii")
+                + " %d %d %d %d %d %f\n" % (xmin, ymin, xmax, ymax, class_num, conf)
             )
 
-output_file.close()
+file_write.close()
 
 # %% Evaluate
 evaluate.evaluate(
@@ -842,26 +904,43 @@ cap = pd.read_csv("./output/output.csv")["packedCAP"]
 print("score: {:f}".format(sum((1.0 - cap) ** 2) / len(cap)))
 
 # %% Visualize
-np_img = cv2.imread(
-    os.path.join(DATA_DIR, "VOCdevkit_test/VOC2007/JPEGImages/000001.jpg")
+load_img = cv2.imread(
+    os.path.join(DATA_DIR, "VOCdevkit_test/VOC2007/JPEGImages/000022.jpg")
 )
-resized_img = cv2.resize(np_img, (IMAGE_SIZE, IMAGE_SIZE))
-np_img = cv2.cvtColor(resized_img, cv2.COLOR_BGR2RGB)
-resized_img = np_img
-np_img = np_img.astype(np.float32)
-np_img = np_img / 255.0
+load_img = cv2.cvtColor(load_img, cv2.COLOR_BGR2RGB)
+resize_img = cv2.resize(load_img, (IMAGE_SIZE, IMAGE_SIZE))
+np_img = resize_img.astype(np.float32)
+np_img = (np_img / 255.0) * 2 - 1
 np_img = np.reshape(np_img, (1, IMAGE_SIZE, IMAGE_SIZE, 3))
 
 y_pred = YOLO(np_img, training=False)
-xmins, ymins, xmaxs, ymaxs, class_nums, confs = process_outputs(y_pred)
-out = zip(xmins, ymins, xmaxs, ymaxs, class_nums, confs)
+out = process_outputs(y_pred)
+out = zip(*out)
 
 for xmin, ymin, xmax, ymax, class_num, conf in out:
     class_name = CLASSES_NAME[class_num]
-    cv2.rectangle(
-        resized_img, (int(xmin), int(ymin)), (int(xmax), int(ymax)), (0, 255, 255), 3
-    )
-    cv2.putText(resized_img, class_name, (0, 200), 2, 1.5, (0, 255, 255), 2)
+    xmin = xmin * (load_img.shape[1] / IMAGE_SIZE)
+    ymin = ymin * (load_img.shape[0] / IMAGE_SIZE)
+    xmax = xmax * (load_img.shape[1] / IMAGE_SIZE)
+    ymax = ymax * (load_img.shape[0] / IMAGE_SIZE)
 
-plt.imshow(resized_img)
-plt.show()
+    cv2.rectangle(
+        load_img, (int(xmin), int(ymin)), (int(xmax), int(ymax)), (0, 255, 255), 3
+    )
+    cv2.putText(load_img, class_name, (0, 200), 2, 1.5, (0, 255, 255), 2)
+
+plt.imshow(load_img)
+
+# %%
+# file_name = "6_000887.jpg"
+# np_img = cv2.imread(f"./data/aug/images/{file_name}")
+# bboxes = []
+# for line in open("./data/aug/aug_data.txt", "r").readlines():
+#     lines = line.split(" ")
+#     if lines[0] == file_name:
+#         bboxes = [int(x) for x in lines[1:]]
+
+# print(bboxes)
+
+# cv2.rectangle(np_img, (bboxes[0], bboxes[1]), (bboxes[2], bboxes[3]), (0, 255, 255), 3)
+# plt.imshow(np_img)
