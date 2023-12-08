@@ -3,6 +3,7 @@
 
 # %%
 import functools
+import math
 import os
 import random
 import re
@@ -18,8 +19,9 @@ import numpy as np
 import pandas as pd
 import PIL
 import tensorflow as tf
+from sklearn.model_selection import train_test_split
 from tensorflow import keras
-from tensorflow.python.keras import layers
+from tensorflow.keras import layers
 from tqdm import tqdm, trange
 from transformers import CLIPTextModel, CLIPTokenizer
 
@@ -48,20 +50,38 @@ CHECKPOINT_DIR: str = "./checkpoints"
 OUTPUT_DIR: str = "./output"
 
 # Tokenizer parameters
-MAX_SENTENCE_LENGTH: int = 20
+MAX_SEQ_LENGTH: int = 20
 
 # Image parameters
-IMAGE_HEIGHT: int = 64
-IMAGE_WIDTH: int = 64
+IMAGE_SIZE: int = 64
 IMAGE_CHANNELS: int = 3
 
 # Dataset parameters
 BATCH_SIZE: int = 64
 
+# Loss parameters
+KID_IMAGE_SIZE: int = 75
+KID_DIFFUSION_STEPS: int = 5
+PLOT_DIFFUSION_STEPS: int = 20
+
+# Model parameters
+INPUT_EMBED_DIM: int = 512
+EMBEDDIN_DIM: int = 32
+UNET_WIDTHS: list[int] = [32, 64, 96, 128]
+RES_BLOCK_DEPTH: int = 2
+EMBEDDING_MAX_FREQ: float = 1000.0
+MIN_SIGNAL_RATE: float = 0.02
+MAX_SIGNAL_RATE: float = 0.95
+
+# Training parameters
+LEARNING_RATE: float = 1e-3
+WEIGHT_DECAY: float = 1e-4
+EMA = 0.999
+N_EPOCH: int = 10
+
 # Other parameters
 RANDOM_STATE: int = 42
 AUTOTUNE = tf.data.experimental.AUTOTUNE
-
 
 # %%
 for dir in [DICT_DIR, DATASET_DIR, IMAGE_DIR, CHECKPOINT_DIR, OUTPUT_DIR]:
@@ -105,7 +125,7 @@ def generate_embed_df(df_train, df_test):
             padding="max_length",
             truncation=True,
             return_tensors="pt",
-            max_length=MAX_SENTENCE_LENGTH,
+            max_length=MAX_SEQ_LENGTH,
         )
         embeddings = encoder(**tokens).last_hidden_state.detach().numpy()
         return embeddings
@@ -152,244 +172,453 @@ df_train.head(5)
 # %% [markdown]
 # ## Dataset
 
-# %%
-class DatasetGenerator:
-    def __init__(self, df_train, df_test) -> None:
-        self.df_train = df_train
-        self.df_test = df_test
-
-    def _load_image(self, path: tf.Tensor) -> np.ndarray:
-        img = tf.io.read_file(path)
-        img = tf.image.decode_jpeg(img, channels=IMAGE_CHANNELS)
-        img = tf.image.convert_image_dtype(img, tf.float32)
-        img = tf.image.resize(img, [IMAGE_HEIGHT, IMAGE_WIDTH])
-        return img
-
-    def _process_pipeline(self, embedding, img_path):
-        img = self._load_image(img_path)
-        return img, embedding
-
-    def generate_train(self) -> tf.data.Dataset:
-        datas = self.df_train.explode("Embeddings")
-        embedding = np.stack(datas["Embeddings"].values)
-        img_path = datas["ImagePath"].values
-
-        dataset = tf.data.Dataset.from_tensor_slices((embedding, img_path))
-        dataset = (
-            dataset.map(self._process_pipeline, num_parallel_calls=AUTOTUNE)
-            .shuffle(len(datas))
-            .batch(BATCH_SIZE, drop_remainder=True)
-            .prefetch(AUTOTUNE)
-        )
-        return dataset
-
-    def generate_test(self) -> tf.data.Dataset:
-        embeddings = self.df_test["Embeddings"].values
-        embeddings = np.stack(embeddings)
-        idx = self.df_test["ID"].values
-
-        dataset = tf.data.Dataset.from_tensor_slices((embeddings, idx))
-        dataset = dataset.repeat().batch(BATCH_SIZE).prefetch(AUTOTUNE)
-        return dataset
-
 
 # %%
-dataset_generator = DatasetGenerator(df_train, df_test)
-dataset_train = dataset_generator.generate_train()
-dataset_test = dataset_generator.generate_test()
+def load_image(path: tf.Tensor) -> np.ndarray:
+    img = tf.io.read_file(path)
+    img = tf.image.decode_jpeg(img, channels=IMAGE_CHANNELS)
+    img = tf.image.convert_image_dtype(img, tf.float32)
+    img = tf.image.resize(img, [IMAGE_SIZE, IMAGE_SIZE])
+    return img
 
-del dataset_generator
 
-# %%# %% [markdown]
+def map_func(embedding, img_path):
+    img = load_image(img_path)
+    return img, embedding
+
+
+def generate_train(df_train):
+    datas = df_train.explode("Embeddings")
+    embedding = np.stack(datas["Embeddings"].values)
+    img_path = datas["ImagePath"].values
+
+    dataset = tf.data.Dataset.from_tensor_slices((embedding, img_path))
+    dataset = (
+        dataset.map(map_func, num_parallel_calls=AUTOTUNE)
+        .shuffle(len(datas))
+        .batch(BATCH_SIZE, drop_remainder=True)
+        .prefetch(AUTOTUNE)
+    )
+    return dataset
+
+
+def generate_val(df_val):
+    datas = df_val.explode("Embeddings")
+    embedding = np.stack(datas["Embeddings"].values)
+    img_path = datas["ImagePath"].values
+
+    dataset = tf.data.Dataset.from_tensor_slices((embedding, img_path))
+    dataset = (
+        dataset.map(map_func, num_parallel_calls=AUTOTUNE)
+        .batch(BATCH_SIZE, drop_remainder=True)
+        .prefetch(AUTOTUNE)
+    )
+    return dataset
+
+
+def generate_test(df_test):
+    embeddings = df_test["Embeddings"].values
+    embeddings = np.stack(embeddings)
+    idx = df_test["ID"].values
+
+    dataset = tf.data.Dataset.from_tensor_slices((embeddings, idx))
+    dataset = dataset.repeat().batch(BATCH_SIZE).prefetch(AUTOTUNE)
+    return dataset
+
+
+# %%
+_df_train, df_val = train_test_split(df_train, test_size=0.2, random_state=RANDOM_STATE)
+dataset_train = generate_train(_df_train)
+dataset_val = generate_val(df_val)
+dataset_test = generate_test(df_test)
+
+# %% [markdown]
 # ## Define model
 
 
-# %%
-class TextEncoder(tf.keras.Model):
-    """
-    Encode text (a caption) into hidden representation
-    input: text, which is a list of ids
-    output: embedding, or hidden representation of input text in dimension of RNN_HIDDEN_SIZE
-    """
-
-    def __init__(self, hparas):
-        super(TextEncoder, self).__init__()
-        self.hparas = hparas
-        self.batch_size = self.hparas["BATCH_SIZE"]
-
-        # embedding with tensorflow API
-        self.embedding = layers.Embedding(
-            self.hparas["VOCAB_SIZE"], self.hparas["EMBED_DIM"]
-        )
-        # RNN, here we use GRU cell, another common RNN cell similar to LSTM
-        self.gru = layers.GRU(
-            self.hparas["RNN_HIDDEN_SIZE"],
-            return_sequences=True,
-            return_state=True,
-            recurrent_initializer="glorot_uniform",
+# %% Loss function
+# Kernel inception distance
+class KID(keras.metrics.Metric):
+    def __init__(self, name="KID", **kwargs):
+        super(KID, self).__init__(name=name, **kwargs)
+        self.kid_record = tf.keras.metrics.Mean(name="kid_record")
+        self.encoder = keras.Sequential(
+            [
+                layers.Input(shape=[IMAGE_SIZE, IMAGE_SIZE, IMAGE_CHANNELS]),
+                layers.Rescaling(255.0),
+                layers.Resizing(KID_IMAGE_SIZE, KID_IMAGE_SIZE),
+                layers.Lambda(keras.applications.inception_v3.preprocess_input),
+                keras.applications.InceptionV3(
+                    include_top=False,
+                    weights="imagenet",
+                    input_shape=(KID_IMAGE_SIZE, KID_IMAGE_SIZE, 3),
+                ),
+                layers.GlobalAveragePooling2D(),
+            ],
+            name="inception_encoder",
         )
 
-    def call(self, text, hidden):
-        text = self.embedding(text)
-        output, state = self.gru(text, initial_state=hidden)
-        return output[:, -1, :], state
+    def polynomial_kernel(self, x, y, c=1, d=3):
+        feature_dim = tf.cast(x.shape[1], tf.float32)
+        return (tf.matmul(x, y, transpose_b=True) / feature_dim + c) ** d
 
-    def initialize_hidden_state(self):
-        return tf.zeros((self.hparas["BATCH_SIZE"], self.hparas["RNN_HIDDEN_SIZE"]))
+    def update_state(self, img_real, img_pred, sample_weight=None):
+        real_feature = self.encoder(img_real)
+        pred_feature = self.encoder(img_pred)
 
+        kernel_real = self.polynomial_kernel(real_feature, real_feature)
+        kernel_pred = self.polynomial_kernel(pred_feature, pred_feature)
+        kernel_cross = self.polynomial_kernel(real_feature, pred_feature)
 
-class Generator(tf.keras.Model):
-    """
-    Generate fake image based on given text(hidden representation) and noise z
-    input: text and noise
-    output: fake image with size 64*64*3
-    """
+        batch_size = img_real.shape[0]
+        batch_size_f = tf.cast(batch_size, tf.float32)
+        mask = 1.0 - tf.eye(batch_size)
 
-    def __init__(self, hparas):
-        super(Generator, self).__init__()
-        self.hparas = hparas
-        self.flatten = tf.keras.layers.Flatten()
-        self.d1 = tf.keras.layers.Dense(self.hparas["DENSE_DIM"])
-        self.d2 = tf.keras.layers.Dense(64 * 64 * 3)
+        kid = (
+            tf.reduce_sum(kernel_real * mask)
+            + tf.reduce_sum(kernel_pred * mask)
+            - 2 * tf.reduce_sum(kernel_cross)
+        ) / (batch_size_f * (batch_size_f - 1))
 
-    def call(self, text, noise_z):
-        text = self.flatten(text)
-        text = self.d1(text)
-        text = tf.nn.leaky_relu(text)
+        self.kid_record.update_state(kid)
 
-        # concatenate input text and random noise
-        text_concat = tf.concat([noise_z, text], axis=1)
-        text_concat = self.d2(text_concat)
+    def result(self):
+        return self.kid_record.result()
 
-        logits = tf.reshape(text_concat, [-1, 64, 64, 3])
-        output = tf.nn.tanh(logits)
-
-        return logits, output
+    def reset_state(self):
+        self.kid_record.reset_state()
 
 
-class Discriminator(tf.keras.Model):
-    """
-    Differentiate the real and fake image
-    input: image and corresponding text
-    output: labels, the real image should be 1, while the fake should be 0
-    """
+# %% Network architecture
+@tf.function
+def sinusoidal_embedding(x: tf.Tensor):
+    min_freq = 1.0
+    max_freq = EMBEDDING_MAX_FREQ
+    freqs = tf.exp(
+        tf.linspace(
+            start=tf.math.log(min_freq),
+            stop=tf.math.log(max_freq),
+            num=EMBEDDIN_DIM // 2,
+        )
+    )
+    angular_speeds = tf.cast(2 * math.pi * freqs, tf.float32)
+    embeddings = tf.concat([tf.sin(x * angular_speeds), tf.cos(x * angular_speeds)], -1)
 
-    def __init__(self, hparas):
-        super(Discriminator, self).__init__()
-        self.hparas = hparas
-        self.flatten = tf.keras.layers.Flatten()
-        self.d_text = tf.keras.layers.Dense(self.hparas["DENSE_DIM"])
-        self.d_img = tf.keras.layers.Dense(self.hparas["DENSE_DIM"])
-        self.d = tf.keras.layers.Dense(1)
+    return embeddings
 
-    def call(self, img, text):
-        text = self.flatten(text)
-        text = self.d_text(text)
-        text = tf.nn.leaky_relu(text)
 
-        img = self.flatten(img)
-        img = self.d_img(img)
-        img = tf.nn.leaky_relu(img)
+def residual_block(width):
+    def apply(x):
+        input_width = x.shape[3]
+        if input_width == width:
+            residual = x
+        else:
+            residual = layers.Conv2D(width, kernel_size=1)(x)
+        x = layers.BatchNormalization(center=False, scale=False)(x)
+        x = layers.Conv2D(width, kernel_size=3, padding="same", activation="swish")(x)
+        x = layers.Conv2D(width, kernel_size=3, padding="same")(x)
+        x = layers.Add()([x, residual])
+        return x
 
-        # concatenate image with paired text
-        img_text = tf.concat([text, img], axis=1)
+    return apply
 
-        logits = self.d(img_text)
-        output = tf.nn.sigmoid(logits)
 
-        return logits, output
+def down_block(width, block_depth):
+    def apply(x):
+        x, skips = x
+        for _ in range(block_depth):
+            x = residual_block(width)(x)
+            skips.append(x)
+        x = layers.AveragePooling2D(pool_size=2)(x)
+        return x
+
+    return apply
+
+
+def up_block(width, block_depth):
+    def apply(x):
+        x, skips = x
+        x = layers.UpSampling2D(size=2, interpolation="bilinear")(x)
+        for _ in range(block_depth):
+            x = layers.Concatenate()([x, skips.pop()])
+            x = residual_block(width)(x)
+        return x
+
+    return apply
+
+
+def get_network(image_size, widths, block_depth):
+    noisy_images = keras.Input(shape=(image_size, image_size, 3))
+    noise_variances = keras.Input(shape=(1, 1, 1))
+    text_embedding = keras.Input(shape=(MAX_SEQ_LENGTH, INPUT_EMBED_DIM))
+
+    e = layers.Lambda(sinusoidal_embedding, output_shape=(1, 1, 32))(noise_variances)
+    e = layers.UpSampling2D(size=image_size, interpolation="nearest")(e)
+
+    t = layers.Lambda(
+        tf.transpose,
+        arguments={"perm": [0, 2, 1]},
+        output_shape=(-1, INPUT_EMBED_DIM, MAX_SEQ_LENGTH),
+    )(text_embedding)
+    t = layers.MaxPool1D(pool_size=(INPUT_EMBED_DIM))(t)
+    t = layers.Flatten()(t)
+    t = layers.Reshape((1, 1, -1))(t)
+    t = layers.UpSampling2D(size=image_size, interpolation="nearest")(t)
+
+    x = layers.Conv2D(widths[0], kernel_size=1)(noisy_images)
+    x = layers.Concatenate()([x, e, t])
+
+    skips = []
+    for width in widths[:-1]:
+        x = down_block(width, block_depth)([x, skips])
+
+    for _ in range(block_depth):
+        x = residual_block(widths[-1])(x)
+
+    for width in reversed(widths[:-1]):
+        x = up_block(width, block_depth)([x, skips])
+
+    noise = layers.Conv2D(3, kernel_size=1, kernel_initializer="zeros")(x)
+
+    return keras.Model(
+        [noisy_images, noise_variances, text_embedding], noise, name="noise_predictor"
+    )
 
 
 # %%
-hparas = {
-    "MAX_SEQ_LENGTH": 20,  # maximum sequence length
-    "EMBED_DIM": 256,  # word embedding dimension
-    "VOCAB_SIZE": len(word2idx),  # size of dictionary of captions
-    "RNN_HIDDEN_SIZE": 128,  # number of RNN neurons
-    "Z_DIM": 512,  # random noise z dimension
-    "DENSE_DIM": 128,  # number of neurons in dense layer
-    "IMAGE_SIZE": [IMAGE_HEIGHT, IMAGE_WIDTH, IMAGE_CHANNELS],  # render image size
-    "BATCH_SIZE": BATCH_SIZE,
-    "LR": 1e-4,
-    "LR_DECAY": 0.5,
-    "BETA_1": 0.5,
-    "N_EPOCH": 600,
-    "N_SAMPLE": len(dataset_train) * BATCH_SIZE,  # size of training data
-    "PRINT_FREQ": 1,  # printing frequency of loss
-}
+class DiffusionModel(keras.Model):
+    def __init__(self, image_size, widths, block_depth):
+        super().__init__()
 
-text_encoder = TextEncoder(hparas)
-generator = Generator(hparas)
-discriminator = Discriminator(hparas)
+        self.normalizer = layers.Normalization()
+        self.network = get_network(image_size, widths, block_depth)
+        self.ema_network = get_network(image_size, widths, block_depth)
 
+    def compile(self, **kwargs):
+        super().compile(**kwargs)
 
-# %% [markdown]
-# ## Loss function and optimizer
+        self.noise_loss_tracker = keras.metrics.Mean(name="n_loss")
+        self.image_loss_tracker = keras.metrics.Mean(name="i_loss")
+        self.kid = KID(name="kid")
+
+    @property
+    def metrics(self):
+        return [self.noise_loss_tracker, self.image_loss_tracker, self.kid]
+
+    def denormalize(self, images):
+        # convert the pixel values back to 0-1 range
+        images = self.normalizer.mean + images * self.normalizer.variance**0.5
+        return tf.clip_by_value(images, 0.0, 1.0)
+
+    def diffusion_schedule(self, diffusion_times):
+        # diffusion times -> angles
+        start_angle = tf.cast(tf.math.acos(MAX_SIGNAL_RATE), "float32")
+        end_angle = tf.cast(tf.math.acos(MIN_SIGNAL_RATE), "float32")
+
+        diffusion_angles = start_angle + diffusion_times * (end_angle - start_angle)
+
+        # angles -> signal and noise rates
+        signal_rates = tf.math.cos(diffusion_angles)
+        noise_rates = tf.math.sin(diffusion_angles)
+        # note that their squared sum is always: sin^2(x) + cos^2(x) = 1
+        return noise_rates, signal_rates
+
+    def denoise(
+        self, noisy_images, noise_rates, signal_rates, text_embeddings, training
+    ):
+        # the exponential moving average weights are used at evaluation
+        if training:
+            network = self.network
+        else:
+            network = self.ema_network
+
+        # predict noise component and calculate the image component using it
+        pred_noises = network(
+            [noisy_images, noise_rates**2, text_embeddings], training=training
+        )
+        pred_images = (noisy_images - noise_rates * pred_noises) / signal_rates
+
+        return pred_noises, pred_images
+
+    def reverse_diffusion(self, initial_noise, text_embeddings, diffusion_steps):
+        # reverse diffusion = sampling
+        num_images = initial_noise.shape[0]
+        step_size = 1.0 / diffusion_steps
+
+        # important line:
+        # at the first sampling step, the "noisy image" is pure noise
+        # but its signal rate is assumed to be nonzero (min_signal_rate)
+        next_noisy_images = initial_noise
+        for step in range(diffusion_steps):
+            noisy_images = next_noisy_images
+
+            # separate the current noisy image to its components
+            diffusion_times = tf.ones((num_images, 1, 1, 1)) - step * step_size
+            noise_rates, signal_rates = self.diffusion_schedule(diffusion_times)
+            pred_noises, pred_images = self.denoise(
+                noisy_images, noise_rates, signal_rates, text_embeddings, training=False
+            )
+            # network used in eval mode
+
+            # remix the predicted components using the next signal and noise rates
+            next_diffusion_times = diffusion_times - step_size
+            next_noise_rates, next_signal_rates = self.diffusion_schedule(
+                next_diffusion_times
+            )
+            next_noisy_images = (
+                next_signal_rates * pred_images + next_noise_rates * pred_noises
+            )
+            # this new noisy image will be used in the next step
+
+        return pred_images
+
+    def generate(self, num_images, text_embeddings, diffusion_steps):
+        # noise -> images -> denormalized images
+        initial_noise = tf.random.normal(
+            shape=(num_images, IMAGE_SIZE, IMAGE_SIZE, IMAGE_CHANNELS)
+        )
+        generated_images = self.reverse_diffusion(
+            initial_noise, text_embeddings, diffusion_steps
+        )
+        generated_images = self.denormalize(generated_images)
+        return generated_images
+
+    def train_step(self, batch):
+        images, embeddings = batch
+
+        # normalize images to have standard deviation of 1, like the noises
+        images = self.normalizer(images, training=True)
+        noises = tf.random.normal(
+            shape=(BATCH_SIZE, IMAGE_SIZE, IMAGE_SIZE, IMAGE_CHANNELS)
+        )
+
+        # sample uniform random diffusion times
+        diffusion_times = tf.random.uniform(
+            shape=(BATCH_SIZE, 1, 1, 1), minval=0.0, maxval=1.0
+        )
+        noise_rates, signal_rates = self.diffusion_schedule(diffusion_times)
+        # mix the images with noises accordingly
+        noisy_images = signal_rates * images + noise_rates * noises
+
+        with tf.GradientTape() as tape:
+            # train the network to separate noisy images to their components
+            pred_noises, pred_images = self.denoise(
+                noisy_images, noise_rates, signal_rates, embeddings, training=True
+            )
+
+            noise_loss = self.loss(noises, pred_noises)  # used for training
+            image_loss = self.loss(images, pred_images)  # only used as metric
+
+        gradients = tape.gradient(noise_loss, self.network.trainable_weights)
+        self.optimizer.apply_gradients(zip(gradients, self.network.trainable_weights))
+
+        self.noise_loss_tracker.update_state(noise_loss)
+        self.image_loss_tracker.update_state(image_loss)
+
+        # track the exponential moving averages of weights
+        for weight, ema_weight in zip(self.network.weights, self.ema_network.weights):
+            ema_weight.assign(EMA * ema_weight + (1 - EMA) * weight)
+
+        # KID is not measured during the training phase for computational efficiency
+        return {m.name: m.result() for m in self.metrics[:-1]}
+
+    def test_step(self, batch):
+        images, embeddings = batch
+        # normalize images to have standard deviation of 1, like the noises
+        images = self.normalizer(images, training=False)
+        noises = tf.random.normal(shape=(BATCH_SIZE, IMAGE_SIZE, IMAGE_SIZE, 3))
+
+        # sample uniform random diffusion times
+        diffusion_times = tf.random.uniform(
+            shape=(BATCH_SIZE, 1, 1, 1), minval=0.0, maxval=1.0
+        )
+        noise_rates, signal_rates = self.diffusion_schedule(diffusion_times)
+        # mix the images with noises accordingly
+        noisy_images = signal_rates * images + noise_rates * noises
+
+        # use the network to separate noisy images to their components
+        pred_noises, pred_images = self.denoise(
+            noisy_images, noise_rates, signal_rates, embeddings, training=False
+        )
+
+        noise_loss = self.loss(noises, pred_noises)
+        image_loss = self.loss(images, pred_images)
+
+        self.image_loss_tracker.update_state(image_loss)
+        self.noise_loss_tracker.update_state(noise_loss)
+
+        # measure KID between real and generated images
+        # this is computationally demanding, kid_diffusion_steps has to be small
+        images = self.denormalize(images)
+        generated_images = self.generate(
+            num_images=BATCH_SIZE,
+            text_embeddings=embeddings,
+            diffusion_steps=KID_DIFFUSION_STEPS,
+        )
+        self.kid.update_state(images, generated_images)
+
+        return {m.name: m.result() for m in self.metrics}
+
+    def plot_images(self, epoch=None, logs=None, num_rows=3, num_cols=6):
+        # plot random generated images for visual evaluation of generation quality
+        generated_images = self.generate(
+            num_images=num_rows * num_cols,
+            diffusion_steps=PLOT_DIFFUSION_STEPS,
+        )
+
+        plt.figure(figsize=(num_cols * 2.0, num_rows * 2.0))
+        for row in range(num_rows):
+            for col in range(num_cols):
+                index = row * num_cols + col
+                plt.subplot(num_rows, num_cols, index + 1)
+                plt.imshow(generated_images[index])
+                plt.axis("off")
+        plt.tight_layout()
+        plt.show()
+        plt.close()
+
 
 # %%
-cross_entropy = tf.keras.losses.BinaryCrossentropy(from_logits=True)
-
-
-def discriminator_loss(real_logit, fake_logit):
-    real_loss = cross_entropy(tf.ones_like(real_logit), real_logit)
-    fake_loss = cross_entropy(tf.zeros_like(fake_logit), fake_logit)
-    return real_loss + fake_loss
-
-
-def generator_loss(fake_output):
-    return cross_entropy(tf.ones_like(fake_output), fake_output)
-
-
-generator_optimizer = tf.keras.optimizers.Adam(hparas["LR"])
-discriminator_optimizer = tf.keras.optimizers.Adam(hparas["LR"])
-
-
-# %%
-checkpoint = tf.train.Checkpoint(
-    generator_optimizer=generator_optimizer,
-    discriminator_optimizer=discriminator_optimizer,
-    text_encoder=text_encoder,
-    generator=generator,
-    discriminator=discriminator,
+model = DiffusionModel(
+    image_size=IMAGE_SIZE,
+    widths=UNET_WIDTHS,
+    block_depth=RES_BLOCK_DEPTH,
 )
+
+model.compile(
+    optimizer=keras.optimizers.AdamW(
+        learning_rate=LEARNING_RATE, weight_decay=WEIGHT_DECAY
+    ),
+    loss=keras.losses.mean_absolute_error,
+)
+
+
+checkpoint = tf.train.Checkpoint(diffusion_model=model)
 ckpt_manager = tf.train.CheckpointManager(
     checkpoint, CHECKPOINT_DIR, max_to_keep=5, checkpoint_name="ckpt"
 )
 
+model.normalizer.adapt(dataset_train.map(lambda x, y: x))
+
+model.fit(
+    dataset_train,
+    validation_data=dataset_val,
+    epochs=N_EPOCH,
+)
+
 
 # %%
-@tf.function
-def train_step(real_image, caption, hidden):
-    # random noise for generator
-    noise = tf.random.normal(
-        shape=[hparas["BATCH_SIZE"], hparas["Z_DIM"]], mean=0.0, stddev=1.0
-    )
+_, embedding = next(iter(dataset_train))
+embedding = embedding[:8]
 
-    with tf.GradientTape() as gen_tape, tf.GradientTape() as disc_tape:
-        text_embed, hidden = text_encoder(caption, hidden)
-        _, fake_image = generator(text_embed, noise)
-        real_logits, real_output = discriminator(real_image, text_embed)
-        fake_logits, fake_output = discriminator(fake_image, text_embed)
+imgs = model.generate(8, embedding, 20)
+imgs = imgs.numpy()
 
-        g_loss = generator_loss(fake_logits)
-        d_loss = discriminator_loss(real_logits, fake_logits)
-
-    grad_g = gen_tape.gradient(g_loss, generator.trainable_variables)
-    grad_d = disc_tape.gradient(d_loss, discriminator.trainable_variables)
-
-    generator_optimizer.apply_gradients(zip(grad_g, generator.trainable_variables))
-    discriminator_optimizer.apply_gradients(
-        zip(grad_d, discriminator.trainable_variables)
-    )
-
-    return g_loss, d_loss
-
-
-@tf.function
-def test_step(caption, noise, hidden):
-    text_embed, hidden = text_encoder(caption, hidden)
-    _, fake_image = generator(text_embed, noise)
-    return fake_image
+plt.figure(figsize=(16, 8))
+for i, img in enumerate(imgs):
+    plt.subplot(2, 4, i + 1)
+    plt.imshow(img)
+    plt.axis("off")
 
 
 # %% [markdown]
@@ -427,9 +656,6 @@ def sample_generator(caption, batch_size):
 # %%
 ni = int(np.ceil(np.sqrt(BATCH_SIZE)))
 sample_size = BATCH_SIZE
-sample_seed = np.random.normal(
-    loc=0.0, scale=1.0, size=(sample_size, hparas["Z_DIM"])
-).astype(np.float32)
 sample_sentence = (
     ["the flower shown has yellow anther red pistil and bright red petals."]
     * int(sample_size / ni)
@@ -454,93 +680,8 @@ sample_sentence = (
 sample_sentence = sample_generator(sample_sentence, BATCH_SIZE)
 
 
-# %% [markdown]
-# ## Training
-
 # %%
-output_dir = os.path.join(OUTPUT_DIR, "train")
-if not os.path.exists(output_dir):
-    os.makedirs(output_dir)
-
-
-# %%
-def train(dataset, epochs):
-    # hidden state of RNN
-    hidden = text_encoder.initialize_hidden_state()
-    steps_per_epoch = int(hparas["N_SAMPLE"] / BATCH_SIZE)
-    pbar = trange(epochs, desc="Epoch", unit="epoch")
-
-    for epoch in pbar:
-        g_total_loss = 0
-        d_total_loss = 0
-        start = time.time()
-
-        for image, caption in dataset:
-            g_loss, d_loss = train_step(image, caption, hidden)
-            g_total_loss += g_loss
-            d_total_loss += d_loss
-
-        pbar.set_postfix(
-            {
-                "gen_loss": g_total_loss.numpy() / steps_per_epoch,
-                "disc_loss": d_total_loss.numpy() / steps_per_epoch,
-                "time": time.time() - start,
-            }
-        )
-
-        # save the model
-        if (epoch + 1) % 50 == 0:
-            ckpt_manager.save()
-
-        # visualization
-        if (epoch + 1) % hparas["PRINT_FREQ"] == 0:
-            for caption in sample_sentence:
-                fake_image = test_step(caption, sample_seed, hidden)
-            save_images(fake_image, [ni, ni], f"{output_dir}/train_{epoch:02d}.jpg")
-
-
-# %%
-train(dataset_train, hparas["N_EPOCH"])
-
-
-# %% [markdown]
-# ## Evalutation
-
-# %%
-output_dir = os.path.join(OUTPUT_DIR, "inference")
-if not os.path.exists(output_dir):
-    os.makedirs(output_dir)
-
-
-# %%
-def inference(dataset):
-    hidden = text_encoder.initialize_hidden_state()
-    sample_size = BATCH_SIZE
-    sample_seed = np.random.normal(
-        loc=0.0, scale=1.0, size=(sample_size, hparas["Z_DIM"])
-    ).astype(np.float32)
-
-    start = time.time()
-    pbar = trange(819 // BATCH_SIZE + 1, desc="Inference", unit="batch")
-    for _ in pbar:
-        captions, idx = next(iter(dataset))
-        fake_image = test_step(captions, sample_seed, hidden)
-        for i in range(BATCH_SIZE):
-            plt.imsave(
-                f"{output_dir}/inference_{idx[i]:04d}.jpg",
-                fake_image[i].numpy() * 0.5 + 0.5,
-            )
-
-    print("Time for inference is {:.4f} sec".format(time.time() - start))
-
-
-# %%
-ckpt_manager.restore_or_initialize()
-inference(dataset_test)
-
-
-# %%
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+# os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 
 # %cd evaluation
 # !python inception_score.py ../output/inference ../output/score.csv 39
