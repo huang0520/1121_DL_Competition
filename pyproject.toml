@@ -1,0 +1,44 @@
+[tool.poetry]
+name = "1121-DL-Competition"
+version = "0.1.0"
+description = ""
+authors = ["huang0520 <huangmorris4x@gmail.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = ">=3.10, <3.11"
+tensorflow = "2.14.*"
+numpy = "^1.26.2"
+scipy = "^1.11.4"
+matplotlib = "^3.8.2"
+pandas = "^2.1.3"
+tqdm = "^4.66.1"
+notebook = "^7.0.6"
+scikit-learn = "^1.3.2"
+opencv-python = "^4.8.1.78"
+# CUDA
+nvidia-cudnn-cu11 = "^8.9.6.50"
+albumentations = "^1.3.1"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.ruff]
+target-version = "py310"
+
+select = [
+    "F",    # Pyflakes
+    "E",    # Pycodestyle Errors
+    "W",    # Pycodestyle Warnings
+    "I001", # isort
+    "N",    # Naming
+]
+ignore = ["F401", "E402"]
+include = ["*.py", "*.pyi", "**/pyproject.toml", "*.ipynb"]
+
+line-length = 88
+
+[tool.ruff.pydocstyle]
+convention = "google" # Accepts: "google", "numpy", or "pep257".
