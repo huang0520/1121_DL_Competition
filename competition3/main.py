@@ -216,6 +216,7 @@ def generate_val(df_val):
     return dataset
 
 
+# TODO: Change the test embedding format
 def generate_test(df_test):
     embeddings = df_test["Embeddings"].values
     embeddings = np.stack(embeddings)
@@ -290,6 +291,7 @@ class KID(keras.metrics.Metric):
 
 
 # %% Network architecture
+# TODO: Refactor the network architecture
 @tf.function
 def sinusoidal_embedding(x: tf.Tensor):
     min_freq = 1.0
@@ -386,6 +388,7 @@ def get_network(image_size, widths, block_depth):
 
 
 # %%
+# TODO: Refactor the model
 class DiffusionModel(keras.Model):
     def __init__(self, image_size, widths, block_depth):
         super().__init__()
@@ -626,6 +629,7 @@ for i, img in enumerate(imgs):
 
 
 # %%
+# TODO: Rewrite the visualization code to match the new model
 def merge(images, size):
     h, w = images.shape[1], images.shape[2]
     img = np.zeros((h * size[0], w * size[1], 3))
