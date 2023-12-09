@@ -4,19 +4,16 @@
   "editor.formatOnPaste": true,
   // ipynb 啟動格式化設定
   "notebook.formatOnSave.enabled": true,
-  // 避免使用 autopeap8 進行格式化，不用在意 Warning
-  "python.formatting.provider": "none",
 
   // 去除多餘空白，只保留一行
   "files.insertFinalNewline": true,
   "files.trimTrailingWhitespace": true,
 
-  // .py, .ipynb 使用 Black 格式化
+  // .py, .ipynb 使用 Ruff 格式化
   "[python]": {
-    "editor.defaultFormatter": "ms-python.black-formatter"
+    "editor.defaultFormatter": "charliermarsh.ruff"
   },
-  "black-formatter.args": ["--line-length", "88"],
 
   // 使用 Pylance 作為 Python LSP (Syntax-highlighting, Intellisense, Formatting, Refactoring, Linting, ...)
-  "python.languageServer": "Pylance"
+  "python.languageServer": "Default"
 }

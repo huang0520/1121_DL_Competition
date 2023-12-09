@@ -35,6 +35,7 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.ruff]
 target-version = "py310"
+preview = true
 
 select = [
     "F",    # Pyflakes
@@ -42,6 +43,9 @@ select = [
     "W",    # Pycodestyle Warnings
     "I001", # isort
     "N",    # Naming
+    "PD",   # Pandas-vet
+    "FLY",  # Flynt
+    "PTH",  # Using pathlib
 ]
 ignore = ["F401", "E402"]
 include = ["*.py", "*.pyi", "**/pyproject.toml", "*.ipynb"]
