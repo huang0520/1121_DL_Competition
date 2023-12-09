@@ -19,9 +19,9 @@ import numpy as np
 import pandas as pd
 import PIL
 import tensorflow as tf
+from keras.api._v2.keras import layers
 from sklearn.model_selection import train_test_split
 from tensorflow import keras
-from tensorflow.keras import layers
 from tqdm import tqdm, trange
 from transformers import CLIPTextModel, CLIPTokenizer
 
@@ -69,7 +69,7 @@ INPUT_EMBED_DIM: int = 512
 EMBEDDIN_DIM: int = 32
 UNET_WIDTHS: list[int] = [32, 64, 96, 128]
 RES_BLOCK_DEPTH: int = 2
-EMBEDDING_MAX_FREQ: float = 1000.0
+STEP_EMBED_MAX_FREQ: float = 1000.0
 MIN_SIGNAL_RATE: float = 0.02
 MAX_SIGNAL_RATE: float = 0.95
 
@@ -240,7 +240,7 @@ class KID(keras.metrics.Metric):
         kernel_pred = self.polynomial_kernel(pred_feature, pred_feature)
         kernel_cross = self.polynomial_kernel(real_feature, pred_feature)
 
-        batch_size = img_real.shape[0]
+        batch_size = tf.shape(img_real)[0]
         batch_size_f = tf.cast(batch_size, tf.float32)
         mask = 1.0 - tf.eye(batch_size)
 
@@ -259,12 +259,14 @@ class KID(keras.metrics.Metric):
         self.kid_record.reset_state()
 
 
-# %% Network architecture
-# TODO: Refactor the network architecture
+# %% Noise predictor
 @tf.function
 def sinusoidal_embedding(x: tf.Tensor):
+    """Generate sinusoidal embeddings for step (noise variance)"""
     min_freq = 1.0
-    max_freq = EMBEDDING_MAX_FREQ
+    max_freq = STEP_EMBED_MAX_FREQ
+
+    # Calculate frequencies and angular speeds
     freqs = tf.exp(
         tf.linspace(
             start=tf.math.log(min_freq),
@@ -273,6 +275,8 @@ def sinusoidal_embedding(x: tf.Tensor):
         )
     )
     angular_speeds = tf.cast(2 * math.pi * freqs, tf.float32)
+
+    # Generate embeddings by concatenating sine and cosine functions
     embeddings = tf.concat([tf.sin(x * angular_speeds), tf.cos(x * angular_speeds)], -1)
 
     return embeddings
@@ -281,38 +285,11 @@ def sinusoidal_embedding(x: tf.Tensor):
 def residual_block(width):
     def apply(x):
         input_width = x.shape[3]
-        if input_width == width:
-            residual = x
-        else:
-            residual = layers.Conv2D(width, kernel_size=1)(x)
+        residual = x if input_width == width else layers.Conv2D(width, kernel_size=1)(x)
         x = layers.BatchNormalization(center=False, scale=False)(x)
         x = layers.Conv2D(width, kernel_size=3, padding="same", activation="swish")(x)
         x = layers.Conv2D(width, kernel_size=3, padding="same")(x)
         x = layers.Add()([x, residual])
-        return x
-
-    return apply
-
-
-def down_block(width, block_depth):
-    def apply(x):
-        x, skips = x
-        for _ in range(block_depth):
-            x = residual_block(width)(x)
-            skips.append(x)
-        x = layers.AveragePooling2D(pool_size=2)(x)
-        return x
-
-    return apply
-
-
-def up_block(width, block_depth):
-    def apply(x):
-        x, skips = x
-        x = layers.UpSampling2D(size=2, interpolation="bilinear")(x)
-        for _ in range(block_depth):
-            x = layers.Concatenate()([x, skips.pop()])
-            x = residual_block(width)(x)
         return x
 
     return apply
@@ -332,7 +309,6 @@ def get_network(image_size, widths, block_depth):
         output_shape=(-1, INPUT_EMBED_DIM, MAX_SEQ_LENGTH),
     )(text_embedding)
     t = layers.MaxPool1D(pool_size=(INPUT_EMBED_DIM))(t)
-    t = layers.Flatten()(t)
     t = layers.Reshape((1, 1, -1))(t)
     t = layers.UpSampling2D(size=image_size, interpolation="nearest")(t)
 
@@ -340,20 +316,59 @@ def get_network(image_size, widths, block_depth):
     x = layers.Concatenate()([x, e, t])
 
     skips = []
+    # Downsampling blocks
     for width in widths[:-1]:
-        x = down_block(width, block_depth)([x, skips])
+        for _ in range(block_depth):
+            x = residual_block(width)(x)
+            skips.append(x)
+        x = layers.AveragePooling2D(pool_size=2)(x)
 
+    # Bottleneck block
     for _ in range(block_depth):
         x = residual_block(widths[-1])(x)
 
+    # Upsampling blocks
     for width in reversed(widths[:-1]):
-        x = up_block(width, block_depth)([x, skips])
+        x = layers.UpSampling2D(size=2, interpolation="bilinear")(x)
+        for _ in range(block_depth):
+            x = layers.Concatenate()([x, skips.pop()])
+            x = residual_block(width)(x)
 
     noise = layers.Conv2D(3, kernel_size=1, kernel_initializer="zeros")(x)
 
     return keras.Model(
         [noisy_images, noise_variances, text_embedding], noise, name="noise_predictor"
     )
+
+
+# %%
+tmp = get_network(64, [32, 64, 96, 128], 2)
+len(tmp.get_weights())
+
+# %%
+img_normalizer = layers.Normalization()
+
+
+class EMA(keras.callbacks.Callback):
+    def __init__(self, decay=0.999):
+        super().__init__()
+        self.decay = decay
+
+    def on_train_begin(self, logs=None):
+        self.ema_weights = self.model.get_weights()
+
+    def on_batch_end(self, batch, logs=None):
+        for i, weight in enumerate(self.model.get_weights()):
+            self.ema_weights[i] = (
+                self.decay * self.ema_weights[i] + (1 - self.decay) * weight
+            )
+
+    def on_test_begin(self, logs=None):
+        self.backup = self.model.get_weights()
+        self.model.set_weights(self.ema_weights)
+
+    def on_test_end(self, logs=None):
+        self.model.set_weights(self.backup)
 
 
 # %%
@@ -369,8 +384,8 @@ class DiffusionModel(keras.Model):
     def compile(self, **kwargs):
         super().compile(**kwargs)
 
-        self.noise_loss_tracker = keras.metrics.Mean(name="n_loss")
-        self.image_loss_tracker = keras.metrics.Mean(name="i_loss")
+        self.noise_loss_tracker = keras.metrics.Mean(name="noise_loss")
+        self.image_loss_tracker = keras.metrics.Mean(name="image_loss")
         self.kid = KID(name="kid")
 
     @property
@@ -487,7 +502,7 @@ class DiffusionModel(keras.Model):
         self.noise_loss_tracker.update_state(noise_loss)
         self.image_loss_tracker.update_state(image_loss)
 
-        # track the exponential moving averages of weights
+        # Increate the robustness of the model by using exponential moving average
         for weight, ema_weight in zip(self.network.weights, self.ema_network.weights):
             ema_weight.assign(EMA * ema_weight + (1 - EMA) * weight)
 
