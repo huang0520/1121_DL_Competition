@@ -7,9 +7,6 @@ import warnings
 from datetime import datetime
 from random import shuffle
 
-from matplotlib.pylab import f
-from requests import get
-
 sys.path.insert(0, "./evaluate")
 warnings.filterwarnings("ignore")
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
@@ -52,13 +49,13 @@ CLASS_SCALE = 1
 COORD_SCALE = 5
 
 # Training params
-LEARNING_RATE = 7e-6
+LEARNING_RATE = 1e-5
 EPOCHS = 20
 
 # Other params
 AUG_TARGET_NUM = 3000
 AUGMENT = False
-CONF_THRESHOLD = 0.3
+CONF_THRESHOLD = 0.2
 CLASSES_NAME = [
     "aeroplane",
     "bicycle",
@@ -523,6 +520,81 @@ def iou(boxes1, boxes2):
     return inter_square / (square1 + square2 - inter_square + 1e-6)
 
 
+def ciou(boxes1, boxes2) -> tf.Tensor:
+    """
+    Computes the Complete IoU (CIoU) between predicted bounding boxes and ground truth
+    bounding box.
+
+    Args:
+        boxes1 (tf.Tensor):
+        Predicted bounding boxes of shape:
+        [grid_size, grid_size, boxes_per_cell, 4(bx, by, bw, bh)]
+
+        boxes2 (tf.Tensor):
+        True bounding boxes of shape [bx, by, bw, bh]
+    Returns:
+        ciou (tf.Tensor): Complete IoU (CIoU) between predicted bounding boxes and
+        ground truth bounding box.
+    """
+    # Format from x, y, w, h to x_min, y_min, x_max, y_max
+    boxes1_xyxy = tf.concat(
+        [
+            boxes1[..., :2] - boxes1[..., 2:] * 0.5,
+            boxes1[..., :2] + boxes1[..., 2:] * 0.5,
+        ],
+        axis=-1,
+    )
+
+    boxes2_xyxy = tf.concat(
+        [
+            boxes2[:2] - boxes2[2:] * 0.5,
+            boxes2[:2] + boxes2[2:] * 0.5,
+        ],
+        axis=-1,
+    )
+
+    # Left up corner and right bottom corner of the intersection area
+    lu_inter = tf.math.maximum(boxes1_xyxy[..., :2], boxes2_xyxy[:2])
+    rd_inter = tf.math.minimum(boxes1_xyxy[..., 2:], boxes2_xyxy[2:])
+
+    # Left top corner and right bottom corner of the enclosed area
+    lu_enclosed = tf.math.minimum(boxes1_xyxy[..., :2], boxes2_xyxy[:2])
+    rd_enclosed = tf.math.maximum(boxes1_xyxy[..., 2:], boxes2_xyxy[2:])
+
+    # Intersection area and union area and iou
+    wh_inter = tf.math.maximum(0.0, rd_inter - lu_inter)
+    area_inter = wh_inter[..., 0] * wh_inter[..., 1]
+
+    area_boxes1 = (boxes1_xyxy[..., 2] - boxes1_xyxy[..., 0]) * (
+        boxes1_xyxy[..., 3] - boxes1_xyxy[..., 1]
+    )
+    area_boxes2 = (boxes2_xyxy[2] - boxes2_xyxy[0]) * (boxes2_xyxy[3] - boxes2_xyxy[1])
+    area_union = area_boxes1 + area_boxes2 - area_inter
+    iou = area_inter / (area_union + tf.keras.backend.epsilon())
+
+    # Compute the center distance
+    center_distance_square = tf.reduce_sum(
+        tf.math.square(boxes1[..., :2] - boxes2[:2]), axis=-1
+    )
+
+    # Compute the left up and right bottom corner distance
+    wh_enclosed = tf.math.maximum(0.0, rd_enclosed - lu_enclosed)
+    enclosed_distance_square = tf.reduce_sum(tf.math.square(wh_enclosed), axis=-1)
+
+    # Compute the diou term
+    diou_term = center_distance_square / (
+        enclosed_distance_square + tf.keras.backend.epsilon()
+    )
+
+    # Compute the v, alpha term
+    atan1 = tf.math.atan(boxes2[2] / (boxes2[3] + tf.keras.backend.epsilon()))
+    atan2 = tf.math.atan(boxes1[..., 2] / (boxes1[..., 3] + tf.keras.backend.epsilon()))
+    v = 4 * tf.math.square(atan1 - atan2) / (math.pi**2)
+    alpha = v / (1 - iou + v + tf.keras.backend.epsilon())
+
+    return iou - diou_term - alpha * v
+
+
 def losses_calculation(predict, label):
     """
     calculate loss
@@ -593,7 +665,7 @@ def losses_calculation(predict, label):
     # if there's no predict_box in that cell, then the base_boxes will be calcuated with label and got iou equals 0
     predict_boxes = base_boxes + predict_boxes
 
-    iou_predict_truth = iou(predict_boxes, label[0:4])
+    iou_predict_truth = ciou(predict_boxes, label[0:4])
 
     # calculate C tensor [CELL_SIZE, CELL_SIZE, BOXES_PER_CELL]
     C = iou_predict_truth * tf.reshape(response, [CELL_SIZE, CELL_SIZE, 1])
@@ -721,6 +793,8 @@ def train_step(image, labels, objects_num):
     grads = tape.gradient(loss, YOLO.trainable_weights)
     optimizer.apply_gradients(zip(grads, YOLO.trainable_weights))
 
+    return loss
+
 
 def val_step(image, labels, objects_num):
     output = YOLO(image, training=False)
@@ -747,7 +821,9 @@ for i in range(EPOCHS):
 
     print(f"Epoch {ckpt_counter}")
     for image, labels, objects_num in tqdm(train_dataset, desc="Training"):
-        train_step(image, labels, objects_num)
+        loss = train_step(image, labels, objects_num)
+        if tf.math.is_nan(loss):
+            print("NaN loss")
 
     for image, labels, objects_num in tqdm(val_dataset, desc="Validation"):
         val_step(image, labels, objects_num)
@@ -905,7 +981,7 @@ print("score: {:f}".format(sum((1.0 - cap) ** 2) / len(cap)))
 
 # %% Visualize
 load_img = cv2.imread(
-    os.path.join(DATA_DIR, "VOCdevkit_test/VOC2007/JPEGImages/000022.jpg")
+    os.path.join(DATA_DIR, "VOCdevkit_test/VOC2007/JPEGImages/000003.jpg")
 )
 load_img = cv2.cvtColor(load_img, cv2.COLOR_BGR2RGB)
 resize_img = cv2.resize(load_img, (IMAGE_SIZE, IMAGE_SIZE))
