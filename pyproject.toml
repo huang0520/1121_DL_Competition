@@ -46,6 +46,8 @@ select = [
     "PD",   # Pandas-vet
     "FLY",  # Flynt
     "PTH",  # Using pathlib
+    "C4",   # Comprehensive
+    "UP",   # Upgrade newer syntax
 ]
 ignore = ["F401", "E402"]
 include = ["*.py", "*.pyi", "**/pyproject.toml", "*.ipynb"]
