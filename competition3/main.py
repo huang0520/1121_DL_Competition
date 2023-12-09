@@ -85,36 +85,28 @@ AUTOTUNE = tf.data.experimental.AUTOTUNE
 
 # %%
 for dir in [DICT_DIR, DATASET_DIR, IMAGE_DIR, CHECKPOINT_DIR, OUTPUT_DIR]:
-    if not os.path.exists(dir):
-        os.makedirs(dir)
-
+    if not Path(dir).exists():
+        Path(dir).mkdir(parents=True)
 
 # %% [markdown]
 # ## Preprocess text
 
 # %%
-vocab_path: str = os.path.join(DICT_DIR, "vocab.npy")
-word2idx_path: str = os.path.join(DICT_DIR, "word2Id.npy")
-idx2word_path: str = os.path.join(DICT_DIR, "id2Word.npy")
+vocab_path = Path(DICT_DIR) / "vocab.npy"
+word2idx_path = Path(DICT_DIR) / "word2Id.npy"
+idx2word_path = Path(DICT_DIR) / "id2Word.npy"
 
 word2idx: dict = dict(np.load(word2idx_path))
 idx2word: dict = dict(np.load(idx2word_path))
 
 
-def seq_list2sent_list(seq_list: list[list]) -> list[str]:
+def seq2sent(seq: list[int]) -> str:
     pad_id = word2idx["<PAD>"]
-
-    sent_list = []
-    for seq in seq_list:
-        sent = [idx2word[idx] for idx in seq if idx != pad_id]
-        sent_list.append(" ".join(sent))
-
-    return sent_list
+    sent = [idx2word[idx] for idx in seq if idx != pad_id]
+    return " ".join(sent)
 
 
 # %%
-
-
 def generate_embed_df(df_train, df_test):
     tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-base-patch32")
     encoder = CLIPTextModel.from_pretrained("openai/clip-vit-base-patch32")
@@ -132,43 +124,42 @@ def generate_embed_df(df_train, df_test):
 
     # Create embedding for training data
     tqdm.pandas(desc="Embedding training data")
-    cap_seqs = df_train["Captions"]
-    cap_sents = cap_seqs.apply(seq_list2sent_list)
-    embeddings = cap_sents.progress_apply(embed_sent_list)
+    cap_seqs = df_train["Captions"].to_numpy()
+    cap_sents = [[seq2sent(cap_seq) for cap_seq in _cap_seqs] for _cap_seqs in cap_seqs]
+    embeddings = pd.Series(cap_sents).progress_apply(embed_sent_list).to_numpy()
 
     # Change image path
     image_paths = (
-        df_train["ImagePath"]
-        .apply(lambda path: os.path.join(IMAGE_DIR, os.path.basename(path)))
-        .values
+        df_train["ImagePath"].apply(lambda x: Path(IMAGE_DIR) / Path(x).name).to_numpy()
     )
-    df_train = pd.DataFrame({"Embeddings": embeddings, "ImagePath": image_paths})
+    df_train = pd.DataFrame(
+        {"Captions": cap_sents, "Embeddings": embeddings, "ImagePath": image_paths}
+    )
 
     # Create embedding for testing data
     tqdm.pandas(desc="Embedding testing data")
     cap_seqs = df_test["Captions"]
-    cap_sents = cap_seqs.apply(seq_list2sent_list)
-    embeddings = cap_sents.progress_apply(embed_sent_list)
-    df_test = pd.DataFrame({"Embeddings": embeddings, "ID": df_test["ID"]})
+    cap_sents = [seq2sent(cap_seq) for cap_seq in cap_seqs]
+    embeddings = pd.Series(cap_sents).progress_apply(embed_sent_list).to_numpy()
+    id = df_test["ID"].to_numpy()
+    df_test = pd.DataFrame({"Captions": cap_sents, "Embeddings": embeddings, "ID": id})
 
     return df_train, df_test
 
 
-if os.path.exists(os.path.join(DATASET_DIR, "embeddings_train.pkl")):
-    df_train = pd.read_pickle(os.path.join(DATASET_DIR, "embeddings_train.pkl"))
-    df_test = pd.read_pickle(os.path.join(DATASET_DIR, "embeddings_test.pkl"))
+if (Path(DATASET_DIR) / "embeddings_train.pkl").exists():
+    df_train = pd.read_pickle(Path(DATASET_DIR) / "embeddings_train.pkl")
+    df_test = pd.read_pickle(Path(DATASET_DIR) / "embeddings_test.pkl")
     print("Load embeddings from pickle file")
 else:
-    df_train = pd.read_pickle(os.path.join(DATASET_DIR, "text2ImgData.pkl"))
-    df_test = pd.read_pickle(os.path.join(DATASET_DIR, "testData.pkl"))
+    df_train = pd.read_pickle(Path(DATASET_DIR) / "text2ImgData.pkl")
+    df_test = pd.read_pickle(Path(DATASET_DIR) / "testData.pkl")
     df_train, df_test = generate_embed_df(df_train, df_test)
-    df_train.to_pickle(os.path.join(DATASET_DIR, "embeddings_train.pkl"))
-    df_test.to_pickle(os.path.join(DATASET_DIR, "embeddings_test.pkl"))
+    df_train.to_pickle(Path(DATASET_DIR) / "embeddings_train.pkl")
+    df_test.to_pickle(Path(DATASET_DIR) / "embeddings_test.pkl")
     print("Generate embeddings and save to pickle file")
 
-# %%
-df_train.head(5)
-
+df_train.head()
 # %% [markdown]
 # ## Dataset
 
@@ -187,51 +178,29 @@ def map_func(embedding, img_path):
     return img, embedding
 
 
-def generate_train(df_train):
-    datas = df_train.explode("Embeddings")
-    embedding = np.stack(datas["Embeddings"].values)
-    img_path = datas["ImagePath"].values
+def generate_dataset(df: pd.DataFrame, type: str):
+    expolde_df = df.explode("Embeddings")
+    embedding = np.stack(expolde_df["Embeddings"].values)
+    if type == "train" or type == "val":
+        img_path = expolde_df["ImagePath"].to_numpy()
+        dataset = tf.data.Dataset.from_tensor_slices((embedding, img_path))
+        dataset = dataset.map(map_func, num_parallel_calls=AUTOTUNE)
+        dataset = dataset.shuffle(len(expolde_df)) if type == "train" else dataset
+        dataset = dataset.batch(BATCH_SIZE, drop_remainder=True).prefetch(AUTOTUNE)
 
-    dataset = tf.data.Dataset.from_tensor_slices((embedding, img_path))
-    dataset = (
-        dataset.map(map_func, num_parallel_calls=AUTOTUNE)
-        .shuffle(len(datas))
-        .batch(BATCH_SIZE, drop_remainder=True)
-        .prefetch(AUTOTUNE)
-    )
-    return dataset
+    elif type == "test":
+        id = expolde_df["ID"].to_numpy()
+        dataset = tf.data.Dataset.from_tensor_slices((embedding, id))
+        dataset = dataset.repeat().batch(BATCH_SIZE).prefetch(AUTOTUNE)
 
-
-def generate_val(df_val):
-    datas = df_val.explode("Embeddings")
-    embedding = np.stack(datas["Embeddings"].values)
-    img_path = datas["ImagePath"].values
-
-    dataset = tf.data.Dataset.from_tensor_slices((embedding, img_path))
-    dataset = (
-        dataset.map(map_func, num_parallel_calls=AUTOTUNE)
-        .batch(BATCH_SIZE, drop_remainder=True)
-        .prefetch(AUTOTUNE)
-    )
-    return dataset
-
-
-# TODO: Change the test embedding format
-def generate_test(df_test):
-    embeddings = df_test["Embeddings"].values
-    embeddings = np.stack(embeddings)
-    idx = df_test["ID"].values
-
-    dataset = tf.data.Dataset.from_tensor_slices((embeddings, idx))
-    dataset = dataset.repeat().batch(BATCH_SIZE).prefetch(AUTOTUNE)
     return dataset
 
 
 # %%
 _df_train, df_val = train_test_split(df_train, test_size=0.2, random_state=RANDOM_STATE)
-dataset_train = generate_train(_df_train)
-dataset_val = generate_val(df_val)
-dataset_test = generate_test(df_test)
+dataset_train = generate_dataset(_df_train, "train")
+dataset_val = generate_dataset(df_val, "val")
+dataset_test = generate_dataset(df_test, "test")
 
 # %% [markdown]
 # ## Define model
@@ -602,6 +571,7 @@ ckpt_manager = tf.train.CheckpointManager(
 )
 
 model.normalizer.adapt(dataset_train.map(lambda x, y: x))
+
 
 model.fit(
     dataset_train,
