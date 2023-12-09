@@ -2,27 +2,24 @@
 # ## Prepare environment
 
 # %%
-import functools
 import math
 import os
-import random
-import re
-import string
-import time
+import shutil
 from pathlib import Path
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
+import albumentations as alb
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import PIL
 import tensorflow as tf
 from keras.api._v2.keras import layers
 from sklearn.model_selection import train_test_split
 from tensorflow import keras
-from tqdm import tqdm, trange
+from tqdm import tqdm
+from tqdm.keras import TqdmCallback
 from transformers import CLIPTextModel, CLIPTokenizer
 
 # %%
@@ -65,8 +62,7 @@ KID_DIFFUSION_STEPS: int = 5
 PLOT_DIFFUSION_STEPS: int = 20
 
 # Model parameters
-INPUT_EMBED_DIM: int = 512
-EMBEDDIN_DIM: int = 32
+EMBEDDING_DIM: int = 512
 UNET_WIDTHS: list[int] = [32, 64, 96, 128]
 RES_BLOCK_DEPTH: int = 2
 STEP_EMBED_MAX_FREQ: float = 1000.0
@@ -77,7 +73,7 @@ MAX_SIGNAL_RATE: float = 0.95
 LEARNING_RATE: float = 1e-3
 WEIGHT_DECAY: float = 1e-4
 EMA = 0.999
-N_EPOCH: int = 10
+N_EPOCH: int = 30
 
 # Other parameters
 RANDOM_STATE: int = 42
@@ -173,8 +169,23 @@ def load_image(path: tf.Tensor) -> np.ndarray:
     return img
 
 
+@tf.numpy_function(Tout=tf.float32)
+def augment_image(img: tf.Tensor) -> tf.Tensor:
+    aug = alb.Compose(
+        [
+            alb.HorizontalFlip(p=0.25),
+            alb.VerticalFlip(p=0.25),
+            alb.RandomRotate90(p=0.25),
+        ]
+    )
+    img = aug(image=img)["image"]
+    return img
+
+
 def map_func(embedding, img_path):
     img = load_image(img_path)
+    img = augment_image(img)
+    img = tf.reshape(img, [IMAGE_SIZE, IMAGE_SIZE, IMAGE_CHANNELS])
     return img, embedding
 
 
@@ -210,7 +221,7 @@ dataset_test = generate_dataset(df_test, "test")
 # Kernel inception distance
 class KID(keras.metrics.Metric):
     def __init__(self, name="KID", **kwargs):
-        super(KID, self).__init__(name=name, **kwargs)
+        super().__init__(name=name, **kwargs)
         self.kid_record = tf.keras.metrics.Mean(name="kid_record")
         self.encoder = keras.Sequential(
             [
@@ -271,7 +282,7 @@ def sinusoidal_embedding(x: tf.Tensor):
         tf.linspace(
             start=tf.math.log(min_freq),
             stop=tf.math.log(max_freq),
-            num=EMBEDDIN_DIM // 2,
+            num=EMBEDDING_DIM // 2,
         )
     )
     angular_speeds = tf.cast(2 * math.pi * freqs, tf.float32)
@@ -297,23 +308,18 @@ def residual_block(width):
 
 def get_network(image_size, widths, block_depth):
     noisy_images = keras.Input(shape=(image_size, image_size, 3))
-    noise_variances = keras.Input(shape=(1, 1, 1))
-    text_embedding = keras.Input(shape=(MAX_SEQ_LENGTH, INPUT_EMBED_DIM))
+    noise_variances = keras.Input(shape=(1, 1))
+    text_embedding = keras.Input(shape=(MAX_SEQ_LENGTH, EMBEDDING_DIM))
 
-    e = layers.Lambda(sinusoidal_embedding, output_shape=(1, 1, 32))(noise_variances)
-    e = layers.UpSampling2D(size=image_size, interpolation="nearest")(e)
-
-    t = layers.Lambda(
-        tf.transpose,
-        arguments={"perm": [0, 2, 1]},
-        output_shape=(-1, INPUT_EMBED_DIM, MAX_SEQ_LENGTH),
-    )(text_embedding)
-    t = layers.MaxPool1D(pool_size=(INPUT_EMBED_DIM))(t)
-    t = layers.Reshape((1, 1, -1))(t)
-    t = layers.UpSampling2D(size=image_size, interpolation="nearest")(t)
+    noise_embedding = layers.Lambda(
+        sinusoidal_embedding, output_shape=(1, EMBEDDING_DIM)
+    )(noise_variances)
+    embeddings = layers.Concatenate(axis=1)([text_embedding, noise_embedding])
+    embeddings = layers.Dense(widths[0])(embeddings)
 
     x = layers.Conv2D(widths[0], kernel_size=1)(noisy_images)
-    x = layers.Concatenate()([x, e, t])
+    embeddings = layers.Attention()([x, embeddings])
+    x = layers.concatenate([x, embeddings])
 
     skips = []
     # Downsampling blocks
@@ -342,14 +348,7 @@ def get_network(image_size, widths, block_depth):
 
 
 # %%
-tmp = get_network(64, [32, 64, 96, 128], 2)
-len(tmp.get_weights())
-
-# %%
-img_normalizer = layers.Normalization()
-
-
-class EMA(keras.callbacks.Callback):
+class EMACallback(keras.callbacks.Callback):
     def __init__(self, decay=0.999):
         super().__init__()
         self.decay = decay
@@ -357,11 +356,14 @@ class EMA(keras.callbacks.Callback):
     def on_train_begin(self, logs=None):
         self.ema_weights = self.model.get_weights()
 
-    def on_batch_end(self, batch, logs=None):
+    def on_train_batch_end(self, batch, logs=None):
         for i, weight in enumerate(self.model.get_weights()):
             self.ema_weights[i] = (
                 self.decay * self.ema_weights[i] + (1 - self.decay) * weight
             )
+
+    def on_train_end(self, logs=None):
+        self.model.set_weights(self.ema_weights)
 
     def on_test_begin(self, logs=None):
         self.backup = self.model.get_weights()
@@ -379,7 +381,7 @@ class DiffusionModel(keras.Model):
 
         self.normalizer = layers.Normalization()
         self.network = get_network(image_size, widths, block_depth)
-        self.ema_network = get_network(image_size, widths, block_depth)
+        self.ema_weights = None
 
     def compile(self, **kwargs):
         super().compile(**kwargs)
@@ -405,25 +407,22 @@ class DiffusionModel(keras.Model):
         diffusion_angles = start_angle + diffusion_times * (end_angle - start_angle)
 
         # angles -> signal and noise rates
-        signal_rates = tf.math.cos(diffusion_angles)
-        noise_rates = tf.math.sin(diffusion_angles)
+        image_ratio = tf.math.cos(diffusion_angles)
+        noise_ratio = tf.math.sin(diffusion_angles)
         # note that their squared sum is always: sin^2(x) + cos^2(x) = 1
-        return noise_rates, signal_rates
+        return noise_ratio, image_ratio
 
     def denoise(
-        self, noisy_images, noise_rates, signal_rates, text_embeddings, training
+        self, noisy_images, noise_ratio, image_ratio, text_embeddings, training
     ):
         # the exponential moving average weights are used at evaluation
-        if training:
-            network = self.network
-        else:
-            network = self.ema_network
+        network = self.network
 
         # predict noise component and calculate the image component using it
         pred_noises = network(
-            [noisy_images, noise_rates**2, text_embeddings], training=training
+            [noisy_images, noise_ratio**2, text_embeddings], training=training
         )
-        pred_images = (noisy_images - noise_rates * pred_noises) / signal_rates
+        pred_images = (noisy_images - noise_ratio * pred_noises) / image_ratio
 
         return pred_noises, pred_images
 
@@ -441,19 +440,19 @@ class DiffusionModel(keras.Model):
 
             # separate the current noisy image to its components
             diffusion_times = tf.ones((num_images, 1, 1, 1)) - step * step_size
-            noise_rates, signal_rates = self.diffusion_schedule(diffusion_times)
+            noise_ratio, image_ratio = self.diffusion_schedule(diffusion_times)
             pred_noises, pred_images = self.denoise(
-                noisy_images, noise_rates, signal_rates, text_embeddings, training=False
+                noisy_images, noise_ratio, image_ratio, text_embeddings, training=False
             )
             # network used in eval mode
 
             # remix the predicted components using the next signal and noise rates
             next_diffusion_times = diffusion_times - step_size
-            next_noise_rates, next_signal_rates = self.diffusion_schedule(
+            next_noise_ratio, next_image_ratio = self.diffusion_schedule(
                 next_diffusion_times
             )
             next_noisy_images = (
-                next_signal_rates * pred_images + next_noise_rates * pred_noises
+                next_image_ratio * pred_images + next_noise_ratio * pred_noises
             )
             # this new noisy image will be used in the next step
 
@@ -483,14 +482,14 @@ class DiffusionModel(keras.Model):
         diffusion_times = tf.random.uniform(
             shape=(BATCH_SIZE, 1, 1, 1), minval=0.0, maxval=1.0
         )
-        noise_rates, signal_rates = self.diffusion_schedule(diffusion_times)
+        noise_ratio, image_ratio = self.diffusion_schedule(diffusion_times)
         # mix the images with noises accordingly
-        noisy_images = signal_rates * images + noise_rates * noises
+        noisy_images = image_ratio * images + noise_ratio * noises
 
         with tf.GradientTape() as tape:
             # train the network to separate noisy images to their components
             pred_noises, pred_images = self.denoise(
-                noisy_images, noise_rates, signal_rates, embeddings, training=True
+                noisy_images, noise_ratio, image_ratio, embeddings, training=True
             )
 
             noise_loss = self.loss(noises, pred_noises)  # used for training
@@ -503,8 +502,6 @@ class DiffusionModel(keras.Model):
         self.image_loss_tracker.update_state(image_loss)
 
         # Increate the robustness of the model by using exponential moving average
-        for weight, ema_weight in zip(self.network.weights, self.ema_network.weights):
-            ema_weight.assign(EMA * ema_weight + (1 - EMA) * weight)
 
         # KID is not measured during the training phase for computational efficiency
         return {m.name: m.result() for m in self.metrics[:-1]}
@@ -519,13 +516,13 @@ class DiffusionModel(keras.Model):
         diffusion_times = tf.random.uniform(
             shape=(BATCH_SIZE, 1, 1, 1), minval=0.0, maxval=1.0
         )
-        noise_rates, signal_rates = self.diffusion_schedule(diffusion_times)
+        noise_ratio, image_ratio = self.diffusion_schedule(diffusion_times)
         # mix the images with noises accordingly
-        noisy_images = signal_rates * images + noise_rates * noises
+        noisy_images = image_ratio * images + noise_ratio * noises
 
         # use the network to separate noisy images to their components
         pred_noises, pred_images = self.denoise(
-            noisy_images, noise_rates, signal_rates, embeddings, training=False
+            noisy_images, noise_ratio, image_ratio, embeddings, training=False
         )
 
         noise_loss = self.loss(noises, pred_noises)
@@ -546,10 +543,13 @@ class DiffusionModel(keras.Model):
 
         return {m.name: m.result() for m in self.metrics}
 
-    def plot_images(self, epoch=None, logs=None, num_rows=3, num_cols=6):
+    def plot_images(
+        self, epoch=None, logs=None, num_rows=3, num_cols=6, text_embeddings=None
+    ):
         # plot random generated images for visual evaluation of generation quality
         generated_images = self.generate(
             num_images=num_rows * num_cols,
+            text_embeddings=text_embeddings,
             diffusion_steps=PLOT_DIFFUSION_STEPS,
         )
 
@@ -565,7 +565,17 @@ class DiffusionModel(keras.Model):
         plt.close()
 
 
+# %% [markdown]
+# ## Train
+
 # %%
+ckpt_path = Path(CHECKPOINT_DIR) / "diffusion.ckpt"
+ckpt_callback = keras.callbacks.ModelCheckpoint(
+    filepath=ckpt_path,
+    save_weights_only=True,
+    verbose=0,
+)
+
 model = DiffusionModel(
     image_size=IMAGE_SIZE,
     widths=UNET_WIDTHS,
@@ -579,35 +589,41 @@ model.compile(
     loss=keras.losses.mean_absolute_error,
 )
 
-
-checkpoint = tf.train.Checkpoint(diffusion_model=model)
-ckpt_manager = tf.train.CheckpointManager(
-    checkpoint, CHECKPOINT_DIR, max_to_keep=5, checkpoint_name="ckpt"
-)
-
 model.normalizer.adapt(dataset_train.map(lambda x, y: x))
-
 
 model.fit(
     dataset_train,
     validation_data=dataset_val,
     epochs=N_EPOCH,
+    verbose=0,
+    callbacks=[EMACallback(decay=EMA), ckpt_callback],
 )
 
-
 # %%
-_, embedding = next(iter(dataset_train))
-embedding = embedding[:8]
+if (Path(OUTPUT_DIR) / "inference").exists():
+    shutil.rmtree(Path(OUTPUT_DIR) / "inference")
 
-imgs = model.generate(8, embedding, 20)
-imgs = imgs.numpy()
+(Path(OUTPUT_DIR) / "inference").mkdir(parents=True)
 
-plt.figure(figsize=(16, 8))
-for i, img in enumerate(imgs):
-    plt.subplot(2, 4, i + 1)
-    plt.imshow(img)
-    plt.axis("off")
+test_epoch = len(df_test) // BATCH_SIZE + 1
+step = 0
+for embedding, id in dataset_test:
+    step += 1
+    if step > test_epoch:
+        break
 
+    generated_images = model.generate(
+        num_images=BATCH_SIZE,
+        text_embeddings=embedding,
+        diffusion_steps=PLOT_DIFFUSION_STEPS,
+    )
+    for i, img in enumerate(generated_images):
+        plt.imsave(
+            Path(OUTPUT_DIR) / f"inference/inference_{id[i]:04d}.jpg",
+            img.numpy(),
+            vmin=0.0,
+            vmax=1.0,
+        )
 
 # %% [markdown]
 # ## Visualization
@@ -643,39 +659,11 @@ def sample_generator(caption, batch_size):
 
 
 # %%
-ni = int(np.ceil(np.sqrt(BATCH_SIZE)))
-sample_size = BATCH_SIZE
-sample_sentence = (
-    ["the flower shown has yellow anther red pistil and bright red petals."]
-    * int(sample_size / ni)
-    + ["this flower has petals that are yellow, white and purple and has dark lines"]
-    * int(sample_size / ni)
-    + ["the petals on this flower are white with a yellow center"]
-    * int(sample_size / ni)
-    + ["this flower has a lot of small round pink petals."] * int(sample_size / ni)
-    + ["this flower is orange in color, and has petals that are ruffled and rounded."]
-    * int(sample_size / ni)
-    + ["the flower has yellow petals and the center of it is brown."]
-    * int(sample_size / ni)
-    + ["this flower has petals that are blue and white."] * int(sample_size / ni)
-    + [
-        "these white flowers have petals that start off white in color and end in a white towards the tips."
-    ]
-    * int(sample_size / ni)
-)
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 
-# for i, sent in enumerate(sample_sentence):
-# sample_sentence[i] = sentence2sequence(sent)
-sample_sentence = sample_generator(sample_sentence, BATCH_SIZE)
-
-
-# %%
-# os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
-
-# %cd evaluation
-# !python inception_score.py ../output/inference ../output/score.csv 39
-# %cd ..
-
+os.chdir("./evaluation")
+os.system("python inception_score.py ../output/inference ../output/score.csv 39")
+os.chdir("..")
 
 # %%
 df_score = pd.read_csv("./output/score.csv")
