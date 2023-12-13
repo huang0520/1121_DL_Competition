@@ -15,5 +15,5 @@
   },
 
   // 使用 Pylance 作為 Python LSP (Syntax-highlighting, Intellisense, Formatting, Refactoring, Linting, ...)
-  "python.languageServer": "Default"
+  "python.languageServer": "Pylance"
 }
