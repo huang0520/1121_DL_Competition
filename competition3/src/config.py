@@ -2,10 +2,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
-from tensorflow.data.experimental import AUTOTUNE
+import tensorflow as tf
 
 RANDOM_STATE: int = 42
+AUTOTUNE = tf.data.experimental.AUTOTUNE
 RNG_GENERATOR: np.random.Generator = np.random.default_rng(RANDOM_STATE)
+
+UNCONDITIONAL_SENT = ["<|startoftext|>"]
 
 
 @dataclass
@@ -27,19 +30,20 @@ class ModelConfig:
     attentions: tuple[bool] = (False, False, True, True)
     block_depth: int = 2
     embedding_max_freq: float = 1000.0
-    min_signal_rate: float = 0.02
-    max_singal_rate: float = 0.95
+    start_log_snr: float = 3.0
+    end_log_snr: float = -10.0
     kid_image_size: int = 75
     aug_prob: float = 0.3
 
 
 @dataclass
 class TrainConfig:
-    batch_size: int = 64
-    epochs: int = 20
+    batch_size: int = 32
+    epochs: int = 50
     lr: float = 1e-4
     lr_init: float = 1e-5
     lr_decay: float = 1e-5
     ema: float = 0.999
     kid_diffusion_steps: int = 10
     plot_diffusion_steps: int = 40
+    transfer: bool = False

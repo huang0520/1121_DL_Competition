@@ -1,8 +1,8 @@
 import tensorflow as tf
-from src.architecture import get_network
-from src.config import ModelConfig, TrainConfig
-from src.metrics import KID
 from tensorflow import keras
+
+from .architecture import get_network
+from .config import RANDOM_STATE, ModelConfig, TrainConfig
 
 
 class DiffusionModel(keras.Model):
@@ -16,15 +16,14 @@ class DiffusionModel(keras.Model):
         self.normalizer = normalizer
         self.noise_loss_tracker = keras.metrics.Mean(name="noise_loss")
         self.image_loss_tracker = keras.metrics.Mean(name="image_loss")
-        self.kid = KID(name="kid")
 
     @property
     def metrics(self):
-        return [self.noise_loss_tracker, self.image_loss_tracker, self.kid]
+        return [self.noise_loss_tracker, self.image_loss_tracker]
 
     def diffusion_schedule(self, diffusion_times):
-        start_angle = tf.cast(tf.math.acos(ModelConfig.max_singal_rate), tf.float32)
-        end_angle = tf.cast(tf.math.acos(ModelConfig.min_signal_rate), tf.float32)
+        start_angle = tf.math.acos(ModelConfig.max_singal_rate)
+        end_angle = tf.math.acos(ModelConfig.min_signal_rate)
         diffusion_angles = start_angle + diffusion_times * (end_angle - start_angle)
 
         image_ratio = tf.math.cos(diffusion_angles)
@@ -49,11 +48,13 @@ class DiffusionModel(keras.Model):
 
         next_noisy_image = initial_noise
         for step in range(diffusion_steps):
+            noisy_image = next_noisy_image
+
             diffusion_times = tf.ones((num_images, 1, 1, 1)) - step_size * step
             noise_ratio, image_ratio = self.diffusion_schedule(diffusion_times)
 
             pred_noises, pred_images = self.denoise(
-                next_noisy_image,
+                noisy_image,
                 noise_ratio,
                 image_ratio,
                 text_embeddings,
@@ -72,7 +73,8 @@ class DiffusionModel(keras.Model):
 
     def generate(self, num_images, text_embeddings, diffusion_steps):
         initial_noise = tf.random.normal(
-            shape=(num_images, ModelConfig.image_size, ModelConfig.image_size, 3)
+            shape=(num_images, ModelConfig.image_size, ModelConfig.image_size, 3),
+            seed=RANDOM_STATE,
         )
         generate_images = self.reverse_diffusion(
             initial_noise, text_embeddings, diffusion_steps
@@ -91,11 +93,15 @@ class DiffusionModel(keras.Model):
                 ModelConfig.image_size,
                 ModelConfig.image_size,
                 3,
-            )
+            ),
+            seed=RANDOM_STATE,
         )
 
         diffusion_times = tf.random.uniform(
-            shape=(TrainConfig.batch_size, 1, 1, 1), minval=0.0, maxval=1.0
+            shape=(TrainConfig.batch_size, 1, 1, 1),
+            minval=0.0,
+            maxval=1.0,
+            seed=RANDOM_STATE,
         )
         noise_ratio, image_ratio = self.diffusion_schedule(diffusion_times)
         noisy_images = image_ratio * images + noise_ratio * noises
@@ -114,7 +120,7 @@ class DiffusionModel(keras.Model):
         self.noise_loss_tracker.update_state(noise_loss)
         self.image_loss_tracker.update_state(image_loss)
 
-        return {m.name: m.result() for m in self.metrics[:-1]}
+        return {m.name: m.result() for m in self.metrics}
 
     @tf.function
     def test_step(self, data):
@@ -127,11 +133,15 @@ class DiffusionModel(keras.Model):
                 ModelConfig.image_size,
                 ModelConfig.image_size,
                 3,
-            )
+            ),
+            seed=RANDOM_STATE,
         )
 
         diffusion_times = tf.random.uniform(
-            shape=(TrainConfig.batch_size, 1, 1, 1), minval=0.0, maxval=1.0
+            shape=(TrainConfig.batch_size, 1, 1, 1),
+            minval=0.0,
+            maxval=1.0,
+            seed=RANDOM_STATE,
         )
         noise_ratio, image_ratio = self.diffusion_schedule(diffusion_times)
         pred_noises, pred_images = self.denoise(
@@ -143,14 +153,6 @@ class DiffusionModel(keras.Model):
 
         self.noise_loss_tracker.update_state(noise_loss)
         self.image_loss_tracker.update_state(image_loss)
-
-        images = self.denormalize(images)
-        generate_images = self.generate(
-            num_images=TrainConfig.batch_size,
-            text_embeddings=embeddings,
-            diffusion_steps=TrainConfig.kid_diffusion_steps,
-        )
-        self.kid.update_state(images, generate_images)
 
         return {m.name: m.result() for m in self.metrics}
 

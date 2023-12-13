@@ -2,7 +2,8 @@
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from src.config import AUTOTUNE, RANDOM_STATE, RNG_GENERATOR, ModelConfig, TrainConfig
+
+from .config import AUTOTUNE, RANDOM_STATE, RNG_GENERATOR, ModelConfig, TrainConfig
 
 
 def load_image(path: tf.Tensor) -> tf.Tensor:
@@ -39,7 +40,7 @@ def generate_dataset(df: pd.DataFrame, type: str) -> tf.data.Dataset:
     )
 
     if type == "train" or type == "val":
-        img_paths = df["ImagePath"].to_numpy()
+        img_paths = df["ImagePath"].to_numpy().astype(str)
 
         dataset = tf.data.Dataset.from_tensor_slices((img_paths, embeddings))
         dataset = dataset.map(

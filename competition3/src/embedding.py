@@ -2,9 +2,11 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from src.config import DirPath, ModelConfig
+import torch
 from tqdm import tqdm
 from transformers import CLIPProcessor, CLIPTextModel
+
+from .config import DirPath, ModelConfig
 
 TextTokenizer = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
 TextEncoder = CLIPTextModel.from_pretrained("openai/clip-vit-base-patch32")
@@ -30,6 +32,11 @@ def get_embedding_df():
             return_tensors="pt",
             max_length=ModelConfig.max_seq_len,
         )
+        position_ids = torch.arange(
+            0, ModelConfig.max_seq_len, device=tokens.input_ids.device
+        )
+        tokens.position_ids = position_ids
+
         embeddings = TextEncoder(**tokens).last_hidden_state.detach().numpy()
         return embeddings
 
@@ -74,8 +81,8 @@ def get_embedding_df():
 
     else:
         print("Generate embedding and save to pickle file")
-        df_train = pd.read_csv(DirPath.dataset / "text2ImgData.pkl")
-        df_test = pd.read_csv(DirPath.dataset / "testData.pkl")
+        df_train = pd.read_pickle(DirPath.dataset / "text2ImgData.pkl")
+        df_test = pd.read_pickle(DirPath.dataset / "testData.pkl")
         df_train, df_test = generate_embedding_df(df_train, df_test)
         df_train.to_pickle(embedding_train_path)
         df_test.to_pickle(embedding_test_path)

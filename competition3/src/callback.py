@@ -1,7 +1,8 @@
 import matplotlib.pyplot as plt
 import tensorflow as tf
-from src.config import TrainConfig
 from tensorflow import keras
+
+from .config import TrainConfig
 
 
 class EMACallback(keras.callbacks.Callback):
@@ -23,27 +24,32 @@ class EMACallback(keras.callbacks.Callback):
         self.model.network.set_weights(self.ema_weights)
 
     def on_test_begin(self, logs=None):
+        print("Test begin")
         self.backup = self.model.network.get_weights()
         self.model.network.set_weights(self.ema_weights)
 
     def on_test_end(self, logs=None):
+        print("Test end")
         self.model.network.set_weights(self.backup)
 
 
 class SamplePlotCallback(keras.callbacks.Callback):
-    def __init__(self, sample_embeddings, diffusions_steps, n_row=2, n_col=5):
+    def __init__(
+        self, sample_embeddings, diffusions_steps, n_row=2, n_col=5, plot_freq=5
+    ):
         super().__init__()
         self.sample_embeddings = sample_embeddings
         self.diffusions_steps = diffusions_steps
         self.n_row = n_row
         self.n_col = n_col
         self.epoch_counter = 0
+        self.plot_freq = plot_freq
 
     def on_test_end(self, logs=None):
-        if (self.epoch_counter + 1) % 5 == 0:
+        if (self.epoch_counter + 1) % self.plot_freq == 0:
             generate_images = self.model.generate(
                 num_images=self.n_row * self.n_col,
-                text_embeddings=self.sample_embeddings,
+                text_embs=self.sample_embeddings,
                 diffusion_steps=self.diffusions_steps,
             )
 
@@ -56,5 +62,4 @@ class SamplePlotCallback(keras.callbacks.Callback):
             plt.show()
             plt.close()
 
-        else:
-            self.epoch_counter += 1
+        self.epoch_counter += 1

@@ -1,7 +1,8 @@
 import tensorflow as tf
-from src.config import ModelConfig, TrainConfig
 from tensorflow import keras
 from tensorflow.keras import layers
+
+from .config import ModelConfig, TrainConfig
 
 
 class KID(keras.metrics.Metric):
