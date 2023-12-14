@@ -3,8 +3,8 @@
 
 # %%
 import os
-import shutil
 from dataclasses import fields
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "1"
@@ -16,8 +16,16 @@ import pandas as pd
 import tensorflow as tf
 from icecream import ic
 from sklearn.model_selection import train_test_split
+from src.architecture_ref import get_network
 from src.callback import EMACallback, SamplePlotCallback
-from src.config import RANDOM_STATE, RNG_GENERATOR, DirPath, ModelConfig, TrainConfig
+from src.config import (
+    RANDOM_STATE,
+    RNG_GENERATOR,
+    DirPath,
+    ModelConfig,
+    TrainConfig,
+    export_config,
+)
 from src.dataset import generate_dataset
 from src.embedding import (
     TextEncoder,
@@ -54,20 +62,41 @@ token = TextTokenizer(
 )
 sample_embeddings = TextEncoder(**token).last_hidden_state.detach().numpy()
 
+unconditional_token = TextTokenizer(
+    "",
+    max_length=ModelConfig.max_seq_len,
+    return_tensors="pt",
+    truncation=True,
+    padding="max_length",
+)
+unconditional_embedding = (
+    TextEncoder(**unconditional_token).last_hidden_state.detach().numpy()
+)
+unconditional_sample_embeddings = np.repeat(
+    unconditional_embedding, len(sample_embeddings), axis=0
+)
+
 # %% [markdown]
 # ## Dataset
 
 # %%
 df_train, df_val = train_test_split(df_train, test_size=0.2, random_state=RANDOM_STATE)
 df_train.head(2)
-dataset_train = generate_dataset(df_train, "train")
-dataset_val = generate_dataset(df_val, "val")
+# %%
+dataset_train = generate_dataset(df_train, "train", augment=False, method="all")
+dataset_val = generate_dataset(df_val, "val", augment=False, method="all")
 dataset_test = generate_dataset(df_test, "test")
 
+print("Dataset size:")
+print(f"Train: {len(dataset_train)}, Val: {len(dataset_val)}, Test: {len(df_test)}")
+# %%
+get_network().summary()
 # %% [markdown]
 # ## Train
 
 # %%
+timestamp = datetime.now(timezone(timedelta(hours=8))).strftime("%Y%m%d_%H%M%S")
+
 ckpt_path = DirPath.checkpoint / "diffusion.ckpt"
 ckpt_callback = keras.callbacks.ModelCheckpoint(
     filepath=ckpt_path,
@@ -76,36 +105,61 @@ ckpt_callback = keras.callbacks.ModelCheckpoint(
     monitor="val_image_loss",
     verbose=0,
 )
-# ema_callback = EMACallback(ema_decay=TrainConfig.ema)
+
 plot_callback = SamplePlotCallback(
-    sample_embeddings, TrainConfig.plot_diffusion_steps, plot_freq=5
+    sample_embeddings,
+    unconditional_sample_embeddings,
+    TrainConfig.plot_diffusion_steps,
+    plot_freq=5,
+    cfg_scale=TrainConfig.cfg_scale,
 )
 
+log_path = DirPath.log / f"{timestamp}_loss.csv"
+params_path = DirPath.log / f"{timestamp}_params.toml"
+csv_logger = keras.callbacks.CSVLogger(log_path, separator=",", append=False)
+export_config(params_path)
+
+print("Nomalizer adapting...")
 normalizer = tf.keras.layers.Normalization()
 normalizer.adapt(dataset_train.map(lambda image, embedding: image))
 
-model = DiffusionModel()
-
+model = DiffusionModel(prediction_type="noise")
 model.compile(
     normalizer=normalizer,
-    optimizer=keras.optimizers.AdamW(
-        learning_rate=TrainConfig.lr, weight_decay=TrainConfig.lr_decay
+    optimizer=keras.optimizers.Lion(
+        learning_rate=TrainConfig.lr_init,
+        weight_decay=TrainConfig.lr_decay,
     ),
     loss=keras.losses.mean_absolute_error,
 )
 
-ckpt = tf.train.latest_checkpoint(DirPath.checkpoint, "diffusion.ckpt")
-if ckpt and TrainConfig.transfer:
-    print(f"Load checkpoint from {ckpt}")
-    model.load_weights(ckpt)
+if TrainConfig.transfer:
+    model.load_weights(ckpt_path)
 
+print("Model training...")
 history = model.fit(
     dataset_train,
     validation_data=dataset_val,
     epochs=TrainConfig.epochs,
     verbose=1,
-    callbacks=[ckpt_callback, plot_callback],
+    callbacks=[ckpt_callback, plot_callback, csv_logger],
 )
+
+# %%
+log = pd.read_csv(log_path)
+train_image_loss = log["image_loss"]
+train_noise_loss = log["noise_loss"]
+val_image_loss = log["val_image_loss"]
+val_noise_loss = log["val_noise_loss"]
+
+plt.plot(train_image_loss, label="train_image_loss", color="blue")
+plt.plot(val_image_loss, label="val_image_loss", linestyle="--", color="blue")
+plt.plot(train_noise_loss, label="train_noise_loss", color="orange")
+plt.plot(val_noise_loss, label="val_noise_loss", linestyle="--", color="orange")
+plt.xlabel("Epoch")
+plt.ylabel("Loss")
+plt.legend()
+plt.show()
 
 # %%
 # # ckpt = tf.train.latest_checkpoint(DirPath.checkpoint)

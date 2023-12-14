@@ -6,15 +6,18 @@ import tensorflow as tf
 from icecream import ic
 from tensorflow import keras
 
-from .architecture import get_network
-from .config import RANDOM_STATE, UNCONDITIONAL_SENT, ModelConfig, TrainConfig
+from .architecture_ref import get_network
+from .config import RANDOM_STATE, ModelConfig, TrainConfig
 
 
 class DiffusionModel(keras.Model):
-    def __init__(self):
+    def __init__(self, prediction_type: str = "noise"):
         super().__init__()
+        assert prediction_type in ["noise", "image", "velocity"]
+
         self.network = get_network()
         self.ema_network = tf.keras.models.clone_model(self.network)
+        self.prediction_type = prediction_type
 
     def compile(self, normalizer, **kwargs):
         super().compile(**kwargs)
@@ -28,17 +31,23 @@ class DiffusionModel(keras.Model):
         images = image * self.normalizer.variance**0.5 + self.normalizer.mean
         return tf.clip_by_value(images, 0.0, 1.0)
 
-    def get_component(self, noisy_image, predict_velocities, signal_rates, noise_rates):
-        pred_velocities = predict_velocities
-        pred_images = signal_rates * noisy_image - noise_rates * pred_velocities
-        pred_noises = noise_rates * noisy_image + signal_rates * pred_velocities
+    def get_component(self, noisy_images, predictions, signal_rates, noise_rates):
+        if self.prediction_type == "velocity":
+            pred_velocities = predictions
+            pred_images = signal_rates * noisy_images - noise_rates * pred_velocities
+            pred_noises = noise_rates * noisy_images + signal_rates * pred_velocities
 
-        pred_images = tf.clip_by_value(
-            pred_images,
-            0.0 - self.normalizer.mean / self.normalizer.variance**0.5,
-            1.0 - self.normalizer.mean / self.normalizer.variance**0.5,
-        )
+        elif self.prediction_type == "image":
+            pred_images = predictions
+            pred_noises = (noisy_images - signal_rates * pred_images) / noise_rates
+            pred_velocities = (signal_rates * noisy_images - pred_images) / noise_rates
 
+        elif self.prediction_type == "noise":
+            pred_noises = predictions
+            pred_images = (noisy_images - noise_rates * pred_noises) / signal_rates
+            pred_velocities = (pred_noises - noise_rates * noisy_images) / signal_rates
+
+        pred_images = self.denomalize(pred_images)
         return pred_noises, pred_images, pred_velocities
 
     def diffusion_schedule(self, diffustion_times):
@@ -59,18 +68,30 @@ class DiffusionModel(keras.Model):
 
         return signal_rate, noise_rate
 
-    def generate(self, num_images, text_embs, diffusion_steps):
+    def generate(
+        self,
+        num_images,
+        text_embs,
+        unconditional_text_embs,
+        diffusion_steps,
+        cfg_scale,
+    ):
         initial_noise = tf.random.normal(
             [num_images, ModelConfig.image_size, ModelConfig.image_size, 3],
             seed=RANDOM_STATE,
         )
-
-        generated_images = self.diffusion_process(
-            initial_noise, text_embs, diffusion_steps
+        generated_images = self.reverse_diffusion(
+            initial_noise,
+            text_embs,
+            unconditional_text_embs,
+            diffusion_steps,
+            cfg_scale,
         )
         return self.denomalize(generated_images)
 
-    def diffusion_process(self, initial_noise, text_embs, diffusion_steps):
+    def reverse_diffusion(
+        self, initial_noise, text_embs, un_text_embs, diffusion_steps, cfg_scale
+    ):
         batch_size = tf.shape(initial_noise)[0]
         step_size = 1.0 / diffusion_steps
 
@@ -82,9 +103,18 @@ class DiffusionModel(keras.Model):
             predictions = self.ema_network(
                 [noisy_images, noise_rate**2, text_embs], training=False
             )
+            un_predictions = self.ema_network(
+                [noisy_images, noise_rate**2, un_text_embs], training=False
+            )
             pred_noises, pred_images, _ = self.get_component(
                 noisy_images, predictions, signal_rate, noise_rate
             )
+            un_pred_noises, _, _ = self.get_component(
+                noisy_images, un_predictions, signal_rate, noise_rate
+            )
+
+            pred_noises = un_pred_noises + cfg_scale * (pred_noises - un_pred_noises)
+            pred_images = (noisy_images - noise_rate * pred_noises) / signal_rate
 
             next_signal_rates, next_noise_rates = self.diffusion_schedule(
                 diffusion_times - step_size
@@ -131,7 +161,14 @@ class DiffusionModel(keras.Model):
             image_loss = self.loss(images, pred_images)
             noise_loss = self.loss(noises, pred_noises)
 
-        gradients = tape.gradient(velocity_loss, self.network.trainable_weights)
+        if self.prediction_type == "noise":
+            loss = noise_loss
+        elif self.prediction_type == "image":
+            loss = image_loss
+        elif self.prediction_type == "velocity":
+            loss = velocity_loss
+
+        gradients = tape.gradient(loss, self.network.trainable_weights)
         self.optimizer.apply_gradients(zip(gradients, self.network.trainable_weights))
 
         self.velocity_loss_tracker.update_state(velocity_loss)
@@ -180,11 +217,23 @@ class DiffusionModel(keras.Model):
 
         return {m.name: m.result() for m in self.metrics}
 
-    def plot_images(self, text_embs, num_rows=2, num_cols=5, diffusion_steps=50):
+    def plot_images(
+        self,
+        text_embs,
+        unconditional_text_embs,
+        num_rows=2,
+        num_cols=5,
+        diffusion_steps=50,
+        cfg_scale=3.0,
+    ):
         assert num_rows * num_cols == text_embs.shape[0]
 
         generated_images = self.generate(
-            num_rows * num_cols, text_embs, diffusion_steps
+            num_rows * num_cols,
+            text_embs,
+            unconditional_text_embs,
+            diffusion_steps,
+            cfg_scale,
         )
 
         generated_images = tf.reshape(

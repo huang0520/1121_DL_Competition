@@ -2,6 +2,7 @@
 import numpy as np
 import pandas as pd
 import tensorflow as tf
+from icecream import ic
 
 from .config import AUTOTUNE, RANDOM_STATE, RNG_GENERATOR, ModelConfig, TrainConfig
 
@@ -20,7 +21,12 @@ def augment_image(image: tf.Tensor, augmenter) -> tf.Tensor:
     return image
 
 
-def generate_dataset(df: pd.DataFrame, type: str) -> tf.data.Dataset:
+def generate_dataset(
+    df: pd.DataFrame, type: str, method: str = "random", augment: bool = True
+) -> tf.data.Dataset:
+    assert type in ["train", "val", "test"]
+    assert method in ["random", "all"]
+
     augmenter = tf.keras.Sequential(
         [
             tf.keras.layers.experimental.preprocessing.RandomRotation(
@@ -32,24 +38,29 @@ def generate_dataset(df: pd.DataFrame, type: str) -> tf.data.Dataset:
         ]
     )
 
-    embeddings = np.array(
-        [
-            RNG_GENERATOR.choice(_embeddings, size=1).squeeze()
-            for _embeddings in df["Embeddings"]
-        ]
-    )
+    def map_fn(path, embedding):
+        image = load_image(path)
+        image = augment_image(image, augmenter) if augment else image
+        return image, embedding
+
+    if method == "random":
+        df_new = df
+        embeddings = np.array(
+            [
+                RNG_GENERATOR.choice(_embeddings, size=1).squeeze()
+                for _embeddings in df["Embeddings"]
+            ]
+        )
+    elif method == "all":
+        df_new = df.explode("Embeddings") if type != "test" else df
+        embeddings = df_new["Embeddings"].to_numpy()
+        embeddings = np.stack(embeddings)
 
     if type == "train" or type == "val":
-        img_paths = df["ImagePath"].to_numpy().astype(str)
+        img_paths = df_new["ImagePath"].to_numpy().astype(str)
 
         dataset = tf.data.Dataset.from_tensor_slices((img_paths, embeddings))
-        dataset = dataset.map(
-            lambda path, embedding: (
-                augment_image(load_image(path), augmenter),
-                embedding,
-            ),
-            num_parallel_calls=AUTOTUNE,
-        )
+        dataset = dataset.map(map_fn, num_parallel_calls=AUTOTUNE)
         dataset = (
             dataset.shuffle(len(embeddings), seed=RANDOM_STATE)
             if type == "train"

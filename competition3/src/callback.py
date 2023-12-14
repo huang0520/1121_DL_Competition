@@ -35,22 +35,33 @@ class EMACallback(keras.callbacks.Callback):
 
 class SamplePlotCallback(keras.callbacks.Callback):
     def __init__(
-        self, sample_embeddings, diffusions_steps, n_row=2, n_col=5, plot_freq=5
+        self,
+        sample_embeddings,
+        un_sample_embeddings,
+        diffusions_steps,
+        n_row=2,
+        n_col=5,
+        plot_freq=5,
+        cfg_scale=3.0,
     ):
         super().__init__()
         self.sample_embeddings = sample_embeddings
+        self.un_sample_embeddings = un_sample_embeddings
         self.diffusions_steps = diffusions_steps
         self.n_row = n_row
         self.n_col = n_col
         self.epoch_counter = 0
         self.plot_freq = plot_freq
+        self.cfg_scale = cfg_scale
 
     def on_test_end(self, logs=None):
         if (self.epoch_counter + 1) % self.plot_freq == 0:
             generate_images = self.model.generate(
                 num_images=self.n_row * self.n_col,
                 text_embs=self.sample_embeddings,
+                unconditional_text_embs=self.un_sample_embeddings,
                 diffusion_steps=self.diffusions_steps,
+                cfg_scale=self.cfg_scale,
             )
 
             plt.figure(figsize=(2 * self.n_col, 2 * self.n_row))
