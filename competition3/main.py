@@ -3,9 +3,10 @@
 
 # %%
 import os
-from dataclasses import fields
+import shutil
+from dataclasses import asdict, fields
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from time import sleep
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
@@ -14,13 +15,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from icecream import ic
+from icecream import ic, install
 from sklearn.model_selection import train_test_split
-from src.architecture_ref import get_network
-from src.callback import EMACallback, SamplePlotCallback
+from src.callback import EMACallback, PBarCallback, SamplePlotCallback
 from src.config import (
     RANDOM_STATE,
-    RNG_GENERATOR,
+    DatasetConfig,
     DirPath,
     ModelConfig,
     TrainConfig,
@@ -36,15 +36,17 @@ from src.embedding import (
 from src.model2 import DiffusionModel
 from src.utils import check_gpu
 from tensorflow import keras
-from tqdm import tqdm
+from tqdm import tqdm, trange
 
 check_gpu()
+install()
 
 # %%
 for field in fields(DirPath):
     dir = getattr(DirPath, field.name)
     if not dir.exists():
         dir.mkdir(parents=True)
+
 
 # %% [markdown]
 # ## Preprocess text
@@ -55,7 +57,7 @@ df_train, df_test = get_embedding_df()
 sample_sents = pd.read_csv(DirPath.data / "sample_sentence.csv")["sentence"].tolist()
 token = TextTokenizer(
     sample_sents,
-    max_length=ModelConfig.max_seq_len,
+    max_length=DatasetConfig.max_seq_len,
     return_tensors="pt",
     truncation=True,
     padding="max_length",
@@ -64,7 +66,7 @@ sample_embeddings = TextEncoder(**token).last_hidden_state.detach().numpy()
 
 unconditional_token = TextTokenizer(
     "",
-    max_length=ModelConfig.max_seq_len,
+    max_length=DatasetConfig.max_seq_len,
     return_tensors="pt",
     truncation=True,
     padding="max_length",
@@ -83,14 +85,17 @@ unconditional_sample_embeddings = np.repeat(
 df_train, df_val = train_test_split(df_train, test_size=0.2, random_state=RANDOM_STATE)
 df_train.head(2)
 # %%
+# train, val: (image, embedding) | test: (id, embedding)
 dataset_train = generate_dataset(df_train, "train", augment=False, method="all")
 dataset_val = generate_dataset(df_val, "val", augment=False, method="all")
 dataset_test = generate_dataset(df_test, "test")
 
+dataset_test_size = len(df_test) // TrainConfig.batch_size + 1
+
 print("Dataset size:")
-print(f"Train: {len(dataset_train)}, Val: {len(dataset_val)}, Test: {len(df_test)}")
-# %%
-get_network().summary()
+print(
+    f"Train: {len(dataset_train)}, Val: {len(dataset_val)}, Test: {dataset_test_size}"
+)
 # %% [markdown]
 # ## Train
 
@@ -105,14 +110,15 @@ ckpt_callback = keras.callbacks.ModelCheckpoint(
     monitor="val_image_loss",
     verbose=0,
 )
-
+ema_callback = EMACallback(TrainConfig.ema)
 plot_callback = SamplePlotCallback(
     sample_embeddings,
-    unconditional_sample_embeddings,
     TrainConfig.plot_diffusion_steps,
-    plot_freq=5,
-    cfg_scale=TrainConfig.cfg_scale,
+    num_rows=2,
+    num_cols=5,
+    plot_frequency=5,
 )
+pbar_callback = PBarCallback()
 
 log_path = DirPath.log / f"{timestamp}_loss.csv"
 params_path = DirPath.log / f"{timestamp}_params.toml"
@@ -123,8 +129,9 @@ print("Nomalizer adapting...")
 normalizer = tf.keras.layers.Normalization()
 normalizer.adapt(dataset_train.map(lambda image, embedding: image))
 
-model = DiffusionModel(prediction_type="noise")
+model = DiffusionModel(**asdict(ModelConfig()))
 model.compile(
+    prediction_type="velocity",
     normalizer=normalizer,
     optimizer=keras.optimizers.Lion(
         learning_rate=TrainConfig.lr_init,
@@ -136,13 +143,19 @@ model.compile(
 if TrainConfig.transfer:
     model.load_weights(ckpt_path)
 
-print("Model training...")
-history = model.fit(
+print("Start training...")
+model.fit(
     dataset_train,
     validation_data=dataset_val,
     epochs=TrainConfig.epochs,
-    verbose=1,
-    callbacks=[ckpt_callback, plot_callback, csv_logger],
+    verbose=0,
+    callbacks=[
+        ckpt_callback,
+        csv_logger,
+        pbar_callback,
+        ema_callback,
+        plot_callback,
+    ],
 )
 
 # %%
@@ -162,54 +175,54 @@ plt.legend()
 plt.show()
 
 # %%
-# # ckpt = tf.train.latest_checkpoint(DirPath.checkpoint)
-# # model.load_weights(ckpt)
-
-# for images, embeddings in dataset_train.take(1):
-#     plt.imshow(images[0])
-#     plt.show()
-
-#     generated_images = model.generate(
-#         num_images=1,
-#         text_embeddings=embeddings[0:1],
-#         diffusion_steps=TrainConfig.plot_diffusion_steps,
-#     )
-#     plt.imshow(generated_images[0])
-#     plt.show()
-
-# # %%
 # model.load_weights(ckpt_path)
 
+for images, embeddings in dataset_train.take(1):
+    plt.imshow(images[0])
+    plt.show()
 
-# if (Path(OUTPUT_DIR) / "inference").exists():
-#     shutil.rmtree(Path(OUTPUT_DIR) / "inference")
+    generated_images = model.generate(
+        num_images=1,
+        text_embs=embeddings[0:1],
+        diffusion_steps=50,
+    )
+    plt.imshow(generated_images[0])
+    plt.show()
 
-# (Path(OUTPUT_DIR) / "inference").mkdir(parents=True)
+# %%
+# model.load_weights(ckpt_path)
 
-# test_epoch = len(df_test) // BATCH_SIZE + 1
-# step = 0
-# for embeddings, id in dataset_test:
-#     step += 1
-#     if step > test_epoch:
-#         break
+if (DirPath.output / "inference").exists():
+    shutil.rmtree(DirPath.output / "inference")
 
-#     generated_images = model.generate(
-#         num_images=BATCH_SIZE,
-#         text_embeddings=embeddings,
-#         diffusion_steps=PLOT_DIFFUSION_STEPS,
-#     )
-#     for i, img in enumerate(generated_images):
-#         plt.imsave(
-#             Path(OUTPUT_DIR) / f"inference/inference_{id[i]:04d}.jpg",
-#             img.numpy(),
-#             vmin=0.0,
-#             vmax=1.0,
-#         )
+(DirPath.output / "inference").mkdir(parents=True)
 
-# # %% [markdown]
+test_epoch = len(df_test) // TrainConfig.batch_size + 1
+step = 0
+for id, text_embeddings in tqdm(dataset_test, total=test_epoch, colour="green"):
+    step += 1
+    if step > test_epoch:
+        break
+
+    generated_images = model.generate(
+        num_images=TrainConfig.batch_size,
+        text_embs=text_embeddings,
+        diffusion_steps=TrainConfig.plot_diffusion_steps,
+    )
+
+    for i, img in enumerate(generated_images):
+        plt.imsave(
+            DirPath.output / f"inference/inference_{id[i]:04d}.jpg",
+            img.numpy(),
+            vmin=0.0,
+            vmax=1.0,
+        )
+
+# %% [markdown]
 # # ## Visualization
 
 
+# %%
 # # %%
 # # TODO: Rewrite the visualization code to match the new model
 # def merge(images, size):
@@ -240,14 +253,14 @@ plt.show()
 
 
 # # %%
-# os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 
-# os.chdir("./evaluation")
-# os.system("python inception_score.py ../output/inference ../output/score.csv 39")
-# os.chdir("..")
+os.chdir("./evaluation")
+os.system("python inception_score.py ../output/inference ../output/score.csv 39")
+os.chdir("..")
 
-# # %%
-# df_score = pd.read_csv("./output/score.csv")
-# print(f"Score: {np.mean(df_score['score']):.4f} ± {np.std(df_score['score']):.4f}")
+# %%
+df_score = pd.read_csv("./output/score.csv")
+print(f"Score: {np.mean(df_score['score']):.4f} ± {np.std(df_score['score']):.4f}")
 
 # # %%

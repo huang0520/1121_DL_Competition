@@ -2,9 +2,15 @@
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from icecream import ic
 
-from .config import AUTOTUNE, RANDOM_STATE, RNG_GENERATOR, ModelConfig, TrainConfig
+from .config import (
+    AUTOTUNE,
+    RANDOM_STATE,
+    RNG_GENERATOR,
+    DatasetConfig,
+    ModelConfig,
+    TrainConfig,
+)
 
 
 def load_image(path: tf.Tensor) -> tf.Tensor:
@@ -16,7 +22,7 @@ def load_image(path: tf.Tensor) -> tf.Tensor:
 
 
 def augment_image(image: tf.Tensor, augmenter) -> tf.Tensor:
-    apply = tf.random.uniform((), seed=RANDOM_STATE) < ModelConfig.aug_prob
+    apply = tf.random.uniform((), seed=RANDOM_STATE) < DatasetConfig.aug_prob
     image = augmenter(image) if apply else image
     return image
 
@@ -27,16 +33,12 @@ def generate_dataset(
     assert type in ["train", "val", "test"]
     assert method in ["random", "all"]
 
-    augmenter = tf.keras.Sequential(
-        [
-            tf.keras.layers.experimental.preprocessing.RandomRotation(
-                1, seed=RANDOM_STATE
-            ),
-            tf.keras.layers.experimental.preprocessing.RandomFlip(
-                "horizontal_and_vertical", seed=RANDOM_STATE
-            ),
-        ]
-    )
+    augmenter = tf.keras.Sequential([
+        tf.keras.layers.experimental.preprocessing.RandomRotation(1, seed=RANDOM_STATE),
+        tf.keras.layers.experimental.preprocessing.RandomFlip(
+            "horizontal_and_vertical", seed=RANDOM_STATE
+        ),
+    ])
 
     def map_fn(path, embedding):
         image = load_image(path)
@@ -45,12 +47,10 @@ def generate_dataset(
 
     if method == "random":
         df_new = df
-        embeddings = np.array(
-            [
-                RNG_GENERATOR.choice(_embeddings, size=1).squeeze()
-                for _embeddings in df["Embeddings"]
-            ]
-        )
+        embeddings = np.array([
+            RNG_GENERATOR.choice(_embeddings, size=1).squeeze()
+            for _embeddings in df["Embeddings"]
+        ])
     elif method == "all":
         df_new = df.explode("Embeddings") if type != "test" else df
         embeddings = df_new["Embeddings"].to_numpy()

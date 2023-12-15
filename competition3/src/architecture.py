@@ -3,8 +3,6 @@ import math
 import tensorflow as tf
 from tensorflow import keras
 
-from .config import ModelConfig
-
 
 def embedding_layer(embedding_max_freq, embedding_dim):
     def sinusoidal_embedding(x: tf.Tensor):
@@ -110,30 +108,32 @@ def upsampling_block(width):
     return apply
 
 
-def get_network():
-    noisy_image = keras.layers.Input(
-        shape=(ModelConfig.image_size, ModelConfig.image_size, 3)
-    )
-    noise_variance = keras.layers.Input(shape=(1, 1, 1))
-    t_emb = keras.layers.Input(
-        shape=(ModelConfig.max_seq_len, ModelConfig.embedding_dim)
-    )
+def get_network(
+    image_size=64,
+    image_embedding_dim=64,
+    noise_embedding_dim=512,
+    text_embedding_shape=(20, 512),
+    widths=(64, 96, 128, 160),
+    block_depth=2,
+    embedding_max_frequency=1000.0,
+):
+    noisy_image = keras.layers.Input(shape=(image_size, image_size, 3))
+    noise_power = keras.layers.Input(shape=(1, 1, 1))
+    t_emb = keras.layers.Input(shape=text_embedding_shape)
 
-    n_emb = embedding_layer(ModelConfig.embedding_max_freq, ModelConfig.embedding_dim)(
-        noise_variance
-    )
-    n_emb = keras.layers.Dense(ModelConfig.embedding_dim, activation="swish")(n_emb)
-    n_emb = keras.layers.Dense(ModelConfig.embedding_dim)(n_emb)
+    n_emb = embedding_layer(embedding_max_frequency, noise_embedding_dim)(noise_power)
+    n_emb = keras.layers.Dense(noise_embedding_dim, activation="swish")(n_emb)
+    n_emb = keras.layers.Dense(noise_embedding_dim)(n_emb)
 
-    x = keras.layers.Conv2D(ModelConfig.widths[0], 1)(noisy_image)
+    x = keras.layers.Conv2D(image_embedding_dim, 1)(noisy_image)
 
     skips = []
-    x = residual_block(ModelConfig.widths[0])([x, n_emb])
-    x = residual_block(ModelConfig.widths[0])([x, n_emb])
-    x = downsampling_block(ModelConfig.widths[0])(x)
+    x = residual_block(widths[0])([x, n_emb])
+    x = residual_block(widths[0])([x, n_emb])
+    x = downsampling_block(widths[0])(x)
     skips.append(x)
 
-    for width in ModelConfig.widths[1:-1]:
+    for width in widths[1:-1]:
         x = residual_block(width)([x, n_emb])
         x = spatial_transformer_block(width, n_head=2)([x, t_emb])
         skips.append(x)
@@ -143,19 +143,19 @@ def get_network():
         x = downsampling_block(width)(x)
         skips.append(x)
 
-    x = residual_block(ModelConfig.widths[-1])([x, n_emb])
-    x = residual_block(ModelConfig.widths[-1])([x, n_emb])
+    x = residual_block(widths[-1])([x, n_emb])
+    x = residual_block(widths[-1])([x, n_emb])
     skips.append(x)
 
-    x = residual_block(ModelConfig.widths[-1])([x, n_emb])
-    x = spatial_transformer_block(ModelConfig.widths[-1], n_head=2)([x, t_emb])
-    x = residual_block(ModelConfig.widths[-1])([x, n_emb])
+    x = residual_block(widths[-1])([x, n_emb])
+    x = spatial_transformer_block(widths[-1], n_head=2)([x, t_emb])
+    x = residual_block(widths[-1])([x, n_emb])
 
     x = keras.layers.Concatenate()([x, skips.pop()])
-    x = residual_block(ModelConfig.widths[-1])([x, n_emb])
-    x = residual_block(ModelConfig.widths[-1])([x, n_emb])
+    x = residual_block(widths[-1])([x, n_emb])
+    x = residual_block(widths[-1])([x, n_emb])
 
-    for width in reversed(ModelConfig.widths[1:-1]):
+    for width in reversed(widths[1:-1]):
         x = keras.layers.Concatenate()([x, skips.pop()])
         x = upsampling_block(width)(x)
         x = residual_block(width)([x, n_emb])
@@ -166,16 +166,16 @@ def get_network():
         x = spatial_transformer_block(width, n_head=2)([x, t_emb])
 
     x = keras.layers.Concatenate()([x, skips.pop()])
-    x = upsampling_block(ModelConfig.widths[0])(x)
-    x = residual_block(ModelConfig.widths[0])([x, n_emb])
-    x = residual_block(ModelConfig.widths[0])([x, n_emb])
+    x = upsampling_block(widths[0])(x)
+    x = residual_block(widths[0])([x, n_emb])
+    x = residual_block(widths[0])([x, n_emb])
 
     x = keras.layers.GroupNormalization(epsilon=1e-5)(x)
     x = keras.layers.Activation("swish")(x)
     x = keras.layers.Conv2DTranspose(3, 1)(x)
 
     return keras.Model(
-        inputs=[noisy_image, noise_variance, t_emb],
+        inputs=[noisy_image, noise_power, t_emb],
         outputs=x,
         name="noise_predictor",
     )

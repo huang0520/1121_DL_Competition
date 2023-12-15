@@ -6,7 +6,7 @@ import torch
 from tqdm import tqdm
 from transformers import CLIPProcessor, CLIPTextModel
 
-from .config import DirPath, ModelConfig
+from .config import DatasetConfig, DirPath
 
 TextTokenizer = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
 TextEncoder = CLIPTextModel.from_pretrained("openai/clip-vit-base-patch32")
@@ -30,10 +30,10 @@ def get_embedding_df():
             padding="max_length",
             truncation=True,
             return_tensors="pt",
-            max_length=ModelConfig.max_seq_len,
+            max_length=DatasetConfig.max_seq_len,
         )
         position_ids = torch.arange(
-            0, ModelConfig.max_seq_len, device=tokens.input_ids.device
+            0, DatasetConfig.max_seq_len, device=tokens.input_ids.device
         )
         tokens.position_ids = position_ids
 
@@ -55,9 +55,11 @@ def get_embedding_df():
             .apply(lambda x: DirPath.image / Path(x).name)
             .to_numpy()
         )
-        df_train = pd.DataFrame(
-            {"Captions": cap_sents, "Embeddings": embeddings, "ImagePath": image_paths}
-        )
+        df_train = pd.DataFrame({
+            "Captions": cap_sents,
+            "Embeddings": embeddings,
+            "ImagePath": image_paths,
+        })
 
         # Create embedding for testing data
         tqdm.pandas(desc="Embedding testing data")
@@ -65,9 +67,11 @@ def get_embedding_df():
         cap_sents = [seq2sent(cap_seq) for cap_seq in cap_seqs]
         embeddings = pd.Series(cap_sents).progress_apply(embed_sent_list).to_numpy()
         id = df_test["ID"].to_numpy()
-        df_test = pd.DataFrame(
-            {"Captions": cap_sents, "Embeddings": embeddings, "ID": id}
-        )
+        df_test = pd.DataFrame({
+            "Captions": cap_sents,
+            "Embeddings": embeddings,
+            "ID": id,
+        })
 
         return df_train, df_test
 

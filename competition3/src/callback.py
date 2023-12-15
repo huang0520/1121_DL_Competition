@@ -1,8 +1,8 @@
-import matplotlib.pyplot as plt
-import tensorflow as tf
-from tensorflow import keras
+from pathlib import Path
 
-from .config import TrainConfig
+import matplotlib.pyplot as plt
+from tensorflow import keras
+from tqdm import trange
 
 
 class EMACallback(keras.callbacks.Callback):
@@ -13,64 +13,89 @@ class EMACallback(keras.callbacks.Callback):
     def on_train_begin(self, logs=None):
         self.ema_weights = self.model.network.get_weights()
 
-    def on_train_batch_begin(self, batch, logs=None):
-        for ema_weight, weight in zip(
-            self.ema_weights, self.model.network.get_weights()
-        ):
-            ema_weight *= self.ema_decay
-            ema_weight += (1 - self.ema_decay) * weight
-
-    def on_train_end(self, logs=None):
-        self.model.network.set_weights(self.ema_weights)
+    def on_train_batch_end(self, batch, logs=None):
+        self.ema_weights = [
+            self.ema_decay * ema_weight + (1 - self.ema_decay) * weight
+            for ema_weight, weight in zip(
+                self.ema_weights, self.model.network.get_weights()
+            )
+        ]
 
     def on_test_begin(self, logs=None):
-        print("Test begin")
         self.backup = self.model.network.get_weights()
         self.model.network.set_weights(self.ema_weights)
 
     def on_test_end(self, logs=None):
-        print("Test end")
         self.model.network.set_weights(self.backup)
+
+    def on_train_end(self, logs=None):
+        self.model.network.set_weights(self.ema_weights)
 
 
 class SamplePlotCallback(keras.callbacks.Callback):
     def __init__(
         self,
         sample_embeddings,
-        un_sample_embeddings,
         diffusions_steps,
-        n_row=2,
-        n_col=5,
-        plot_freq=5,
-        cfg_scale=3.0,
+        num_rows=2,
+        num_cols=5,
+        plot_frequency=5,
+        save: bool = False,
+        save_path: Path = None,
     ):
         super().__init__()
-        self.sample_embeddings = sample_embeddings
-        self.un_sample_embeddings = un_sample_embeddings
-        self.diffusions_steps = diffusions_steps
-        self.n_row = n_row
-        self.n_col = n_col
-        self.epoch_counter = 0
-        self.plot_freq = plot_freq
-        self.cfg_scale = cfg_scale
 
-    def on_test_end(self, logs=None):
-        if (self.epoch_counter + 1) % self.plot_freq == 0:
-            generate_images = self.model.generate(
-                num_images=self.n_row * self.n_col,
-                text_embs=self.sample_embeddings,
-                unconditional_text_embs=self.un_sample_embeddings,
-                diffusion_steps=self.diffusions_steps,
-                cfg_scale=self.cfg_scale,
+        assert save_path is not None if save else True
+
+        self.sample_embeddings = sample_embeddings
+        self.diffusions_steps = diffusions_steps
+        self.n_row = num_rows
+        self.n_col = num_cols
+        self.plot_freq = plot_frequency
+        self.save = save
+        self.save_path = save_path
+
+    def on_epoch_end(self, epoch, logs=None):
+        if (epoch + 1) % self.plot_freq == 0:
+            generate_images = self.model.plot_image(
+                self.sample_embeddings,
+                self.n_row,
+                self.n_col,
+                self.diffusions_steps,
             )
 
-            plt.figure(figsize=(2 * self.n_col, 2 * self.n_row))
-            for i, img in enumerate(generate_images):
-                plt.subplot(self.n_row, self.n_col, i + 1)
-                plt.imshow(img)
-                plt.axis("off")
-            plt.tight_layout()
-            plt.show()
-            plt.close()
+        if self.save:
+            plt.imsave(self.save_path, generate_images)
 
-        self.epoch_counter += 1
+
+class PBarCallback(keras.callbacks.Callback):
+    def __init__(self):
+        super().__init__()
+
+    def on_train_begin(self, logs=None):
+        assert self.params["verbose"] == 0, "Set verbose=0 when using tqdm pbar"
+        self.pbar = trange(
+            self.params["steps"],
+            desc=f"Epoch 0/{self.params['epochs']}",
+            leave=True,
+            colour="green",
+        )
+
+    def on_epoch_begin(self, epoch, logs=None):
+        self.pbar.set_description(f"Epoch {epoch + 1}/{self.params['epochs']}")
+
+    def on_batch_end(self, batch, logs=None):
+        self.pbar.update(1)
+        self.pbar.set_postfix({
+            "image_loss": logs["image_loss"],
+            "noise_loss": logs["noise_loss"],
+            "velocity_loss": logs["velocity_loss"],
+        })
+
+    def on_epoch_end(self, epoch, logs=None):
+        self.pbar.set_postfix({
+            "val_image_loss": logs["val_image_loss"],
+            "val_noise_loss": logs["val_noise_loss"],
+            "val_velocity_loss": logs["val_velocity_loss"],
+        })
+        self.pbar.reset()
