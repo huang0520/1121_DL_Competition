@@ -109,5 +109,6 @@ class PBarCallback(keras.callbacks.Callback):
             "val_image_loss": logs["val_image_loss"],
             "val_noise_loss": logs["val_noise_loss"],
             "val_velocity_loss": logs["val_velocity_loss"],
+            "val_kid": logs["val_KID"],
         })
         self.pbar.close()

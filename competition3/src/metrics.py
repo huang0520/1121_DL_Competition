@@ -2,7 +2,7 @@ import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
 
-from .config import ModelConfig, TrainConfig
+from .config import ModelConfig
 
 
 class KID(keras.metrics.Metric):
@@ -16,11 +16,7 @@ class KID(keras.metrics.Metric):
                 keras.applications.InceptionV3(
                     include_top=False,
                     weights="imagenet",
-                    input_shape=(
-                        ModelConfig.kid_image_size,
-                        ModelConfig.kid_image_size,
-                        3,
-                    ),
+                    input_shape=(75, 75, 3),
                 ),
                 layers.GlobalAveragePooling2D(),
             ],
@@ -30,7 +26,7 @@ class KID(keras.metrics.Metric):
     def preprocess_input(self, images):
         images = tf.image.resize(
             images,
-            (ModelConfig.kid_image_size, ModelConfig.kid_image_size),
+            (75, 75),
             method="bicubic",
             antialias=True,
         )

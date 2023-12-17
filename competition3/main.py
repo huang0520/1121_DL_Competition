@@ -96,14 +96,14 @@ print(
 # ## Train
 
 # %%
-timestamp = datetime.now(timezone(timedelta(hours=-8))).strftime("%Y%m%d_%H%M%S")
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
 ckpt_path = DirPath.checkpoint / "diffusion.ckpt"
 ckpt_callback = keras.callbacks.ModelCheckpoint(
     filepath=ckpt_path,
     save_weights_only=True,
     save_best_only=True,
-    monitor="val_image_loss",
+    monitor="val_KID",
     verbose=0,
 )
 ema_callback = EMACallback(TrainConfig.ema)
@@ -131,6 +131,8 @@ model = DiffusionModel(**asdict(ModelConfig()))
 model.compile(
     prediction_type="velocity",
     normalizer=normalizer,
+    val_unconditional_embeddings=unconditional_test_embeddings,
+    val_cfg_scale=TrainConfig.cfg_scale,
     optimizer=keras.optimizers.Lion(
         learning_rate=TrainConfig.lr_init,
         weight_decay=TrainConfig.weight_decay,
@@ -162,11 +164,13 @@ train_image_loss = log["image_loss"]
 train_noise_loss = log["noise_loss"]
 val_image_loss = log["val_image_loss"]
 val_noise_loss = log["val_noise_loss"]
+# val_kid = log["val_KID"]
 
 plt.plot(train_image_loss, label="train_image_loss", color="blue")
 plt.plot(val_image_loss, label="val_image_loss", linestyle="--", color="blue")
 plt.plot(train_noise_loss, label="train_noise_loss", color="orange")
 plt.plot(val_noise_loss, label="val_noise_loss", linestyle="--", color="orange")
+# plt.plot(val_kid, label="val_kid", linestyle="--", color="green")
 plt.xlabel("Epoch")
 plt.ylabel("Loss")
 plt.legend()
@@ -213,8 +217,5 @@ os.chdir("./evaluation")
 os.system("python inception_score.py ../output/inference ../output/score.csv 39")
 os.chdir("..")
 
-# %%
 df_score = pd.read_csv("./output/score.csv")
 print(f"Score: {np.mean(df_score['score']):.4f} ± {np.std(df_score['score']):.4f}")
-
-# # %%

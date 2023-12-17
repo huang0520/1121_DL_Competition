@@ -4,6 +4,7 @@ from tensorflow import keras
 
 from .architecture import get_network
 from .config import RANDOM_STATE
+from .metrics import KID
 
 
 class DiffusionModel(keras.Model):
@@ -35,15 +36,26 @@ class DiffusionModel(keras.Model):
         self.start_log_snr = start_log_snr
         self.end_log_snr = end_log_snr
 
-    def compile(self, normalizer, prediction_type: str = "velocity", **kwargs):
+    def compile(
+        self,
+        normalizer,
+        val_unconditional_embeddings,
+        val_cfg_scale,
+        prediction_type: str = "velocity",
+        **kwargs,
+    ):
         super().compile(**kwargs)
         assert prediction_type in ["noise", "image", "velocity"]
 
         self.prediction_type = prediction_type
         self.normalizer = normalizer
+        self.val_unconditional_embeddings = val_unconditional_embeddings
+        self.val_cfg_scale = val_cfg_scale
+
         self.noise_loss_tracker = keras.metrics.Mean(name="noise_loss")
         self.image_loss_tracker = keras.metrics.Mean(name="image_loss")
         self.velocity_loss_tracker = keras.metrics.Mean(name="velocity_loss")
+        self.kid = KID()
 
     @property
     def metrics(self):
@@ -51,6 +63,7 @@ class DiffusionModel(keras.Model):
             self.noise_loss_tracker,
             self.image_loss_tracker,
             self.velocity_loss_tracker,
+            self.kid,
         ]
 
     def denomalize(self, image):
@@ -142,6 +155,7 @@ class DiffusionModel(keras.Model):
         generated_images = self.denomalize(generated_images)
         return generated_images
 
+    @tf.function
     def train_step(self, input):
         images, text_embs = input
 
@@ -180,8 +194,9 @@ class DiffusionModel(keras.Model):
         self.image_loss_tracker.update_state(image_loss)
         self.noise_loss_tracker.update_state(noise_loss)
 
-        return {m.name: m.result() for m in self.metrics}
+        return {m.name: m.result() for m in self.metrics[:-1]}
 
+    @tf.function
     def test_step(self, input):
         images, text_embs = input
 
@@ -208,6 +223,16 @@ class DiffusionModel(keras.Model):
         self.velocity_loss_tracker.update_state(velocity_loss)
         self.image_loss_tracker.update_state(image_loss)
         self.noise_loss_tracker.update_state(noise_loss)
+
+        images = self.denomalize(images)
+        generate_images = self.generate(
+            images.shape[0],
+            text_embs,
+            self.val_unconditional_embeddings,
+            diffusion_steps=5,
+            cfg_scale=self.val_cfg_scale,
+        )
+        self.kid.update_state(images, generate_images)
 
         return {m.name: m.result() for m in self.metrics}
 
