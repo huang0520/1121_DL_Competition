@@ -5,7 +5,7 @@ import numpy as np
 import tensorflow as tf
 import toml
 
-RANDOM_STATE: int = 42
+RANDOM_STATE: int = 0
 AUTOTUNE = tf.data.experimental.AUTOTUNE
 RNG_GENERATOR: np.random.Generator = np.random.default_rng(RANDOM_STATE)
 
@@ -15,7 +15,8 @@ class DirPath:
     data: Path = Path("./data")
     dict: Path = Path("./data/dictionary")
     dataset: Path = Path("./data/dataset")
-    image: Path = Path("./data/102flowers")
+    original_image: Path = Path("./data/102flowers")
+    resize_image: Path = Path("./data/resize_image")
     checkpoint: Path = Path("./checkpoints")
     output: Path = Path("./output")
     log: Path = Path("./logs")
@@ -23,7 +24,7 @@ class DirPath:
 
 @dataclass
 class DatasetConfig:
-    aug_prob: float = 0.4
+    aug_prob: float = 0.3
     max_seq_len: int = 20
 
 
@@ -36,20 +37,21 @@ class ModelConfig:
     widths: tuple[int] = (64, 96, 128, 160)
     block_depth: int = 2
     embedding_max_frequency: float = 1000.0
-    max_signal_rate: float = 0.95
-    min_signal_rate: float = 0.02
+    start_log_snr: float = 2.5
+    end_log_snr: float = -7.5
 
 
 @dataclass
 class TrainConfig:
-    batch_size: int = 64
-    epochs: int = 30
-    lr: float = 1e-3
-    lr_init: float = 3e-5
-    lr_decay: float = 6e-4
+    batch_size: int = 48
+    epochs: int = 50
+    lr: float = 1e-4
+    lr_init: float = 5e-5
+    weight_decay: float = 5e-4
     ema: float = 0.999
     plot_diffusion_steps: int = 100
-    transfer: bool = False
+    transfer: bool = True
+    cfg_scale: float = 3.6
 
 
 def export_config(path: Path):

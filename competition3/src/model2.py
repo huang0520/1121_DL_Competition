@@ -16,8 +16,8 @@ class DiffusionModel(keras.Model):
         widths,
         block_depth,
         embedding_max_frequency,
-        max_signal_rate,
-        min_signal_rate,
+        start_log_snr,
+        end_log_snr,
     ):
         super().__init__()
 
@@ -32,8 +32,8 @@ class DiffusionModel(keras.Model):
         )
 
         self.image_size = image_size
-        self.max_signal_rate = max_signal_rate
-        self.min_signal_rate = min_signal_rate
+        self.start_log_snr = start_log_snr
+        self.end_log_snr = end_log_snr
 
     def compile(self, normalizer, prediction_type: str = "velocity", **kwargs):
         super().compile(**kwargs)
@@ -58,12 +58,20 @@ class DiffusionModel(keras.Model):
         return tf.clip_by_value(images, 0.0, 1.0)
 
     def diffusion_schedule(self, diffustion_times):
-        start_angle = tf.math.acos(self.max_signal_rate)
-        end_angle = tf.math.acos(self.min_signal_rate)
-        diffustion_angles = start_angle + diffustion_times * (end_angle - start_angle)
+        start_snr = tf.math.exp(self.start_log_snr)
+        end_snr = tf.math.exp(self.end_log_snr)
 
-        signal_rate = tf.math.cos(diffustion_angles)
-        noise_rate = tf.math.sin(diffustion_angles)
+        start_noise_power = 1.0 / (1.0 + start_snr)
+        end_noise_power = 1.0 / (1.0 + end_snr)
+
+        noise_power = start_snr**diffustion_times / (
+            start_snr * end_snr**diffustion_times + start_snr**diffustion_times
+        )
+        signal_power = 1.0 - noise_power
+
+        noise_rate = tf.math.sqrt(noise_power)
+        signal_rate = tf.math.sqrt(signal_power)
+
         return noise_rate, signal_rate
 
     def get_component(self, noisy_images, predictions, signal_rates, noise_rates):
@@ -93,34 +101,43 @@ class DiffusionModel(keras.Model):
         )
         return pred_noises, pred_images, pred_velocities
 
-    def reverse_diffusion(self, initial_noise, text_embs, diffusion_steps):
+    def reverse_diffusion(
+        self, initial_noise, text_embs, un_text_embs, diffusion_steps, cfg_scale
+    ):
         batch_size = tf.shape(initial_noise)[0]
         step_size = 1.0 / diffusion_steps
 
-        next_noisy_images = initial_noise
+        noisy_images = initial_noise
         for step in range(diffusion_steps):
             diffusion_times = tf.ones([batch_size, 1, 1, 1]) - step_size * step
             noise_rate, signal_rate = self.diffusion_schedule(diffusion_times)
+
             pred_noises, pred_images, _ = self.denoise(
-                next_noisy_images, text_embs, noise_rate, signal_rate, training=False
+                noisy_images, text_embs, noise_rate, signal_rate, training=False
             )
+            un_pred_noises, _, _ = self.denoise(
+                noisy_images, un_text_embs, noise_rate, signal_rate, training=False
+            )
+
+            pred_noises = un_pred_noises + cfg_scale * (pred_noises - un_pred_noises)
+            pred_images = (noisy_images - noise_rate * pred_noises) / signal_rate
 
             next_diffusion_times = diffusion_times - step_size
             next_noise_rate, next_signal_rate = self.diffusion_schedule(
                 next_diffusion_times
             )
-            next_noisy_images = (
+            noisy_images = (
                 next_signal_rate * pred_images + next_noise_rate * pred_noises
             )
 
         return pred_images
 
-    def generate(self, num_images, text_embs, diffusion_steps):
+    def generate(self, num_images, text_embs, un_text_embs, diffusion_steps, cfg_scale):
         initial_noise = tf.random.normal(
             (num_images, self.image_size, self.image_size, 3), seed=RANDOM_STATE
         )
         generated_images = self.reverse_diffusion(
-            initial_noise, text_embs, diffusion_steps
+            initial_noise, text_embs, un_text_embs, diffusion_steps, cfg_scale
         )
         generated_images = self.denomalize(generated_images)
         return generated_images
@@ -194,9 +211,21 @@ class DiffusionModel(keras.Model):
 
         return {m.name: m.result() for m in self.metrics}
 
-    def plot_image(self, text_embeddings, num_rows, num_cols, diffusion_steps):
+    def plot_image(
+        self,
+        text_embeddings,
+        un_text_embs,
+        num_rows,
+        num_cols,
+        diffusion_steps,
+        cfg_scale,
+    ):
         generate_images = self.generate(
-            num_rows * num_cols, text_embeddings, diffusion_steps=diffusion_steps
+            num_rows * num_cols,
+            text_embeddings,
+            un_text_embs,
+            diffusion_steps=diffusion_steps,
+            cfg_scale=cfg_scale,
         )
         generate_images = tf.reshape(
             generate_images, (num_rows, num_cols, self.image_size, self.image_size, 3)

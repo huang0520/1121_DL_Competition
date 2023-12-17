@@ -27,13 +27,13 @@ from src.config import (
     export_config,
 )
 from src.dataset import generate_dataset
-from src.embedding import (
-    TextEncoder,
-    TextTokenizer,
-    get_embedding_df,
-    remove_embedding_df,
-)
 from src.model2 import DiffusionModel
+from src.preprocess import (
+    generate_embedding_df,
+    generate_resize_image,
+    generate_sample_embeddings,
+    generate_unconditional_embeddings,
+)
 from src.utils import check_gpu
 from tensorflow import keras
 from tqdm import tqdm, trange
@@ -49,33 +49,28 @@ for field in fields(DirPath):
 
 
 # %% [markdown]
-# ## Preprocess text
+# ## Preprocess data
 
 # %%
-df_train, df_test = get_embedding_df()
+if (DirPath.dataset / "embeddings_train.pkl").exists():
+    df_train = pd.read_pickle(DirPath.dataset / "embeddings_train.pkl")
+    df_test = pd.read_pickle(DirPath.dataset / "embeddings_test.pkl")
+else:
+    generate_embedding_df()
+    df_train = pd.read_pickle(DirPath.dataset / "embeddings_train.pkl")
+    df_test = pd.read_pickle(DirPath.dataset / "embeddings_test.pkl")
 
-sample_sents = pd.read_csv(DirPath.data / "sample_sentence.csv")["sentence"].tolist()
-token = TextTokenizer(
-    sample_sents,
-    max_length=DatasetConfig.max_seq_len,
-    return_tensors="pt",
-    truncation=True,
-    padding="max_length",
-)
-sample_embeddings = TextEncoder(**token).last_hidden_state.detach().numpy()
+if len(list((DirPath.resize_image).glob("*.jpg"))) != len(
+    list((DirPath.resize_image).glob("*.jpg"))
+):
+    shutil.rmtree(DirPath.resize_image)
+    (DirPath.resize_image).mkdir(parents=True)
+    generate_resize_image()
 
-unconditional_token = TextTokenizer(
-    "",
-    max_length=DatasetConfig.max_seq_len,
-    return_tensors="pt",
-    truncation=True,
-    padding="max_length",
-)
-unconditional_embedding = (
-    TextEncoder(**unconditional_token).last_hidden_state.detach().numpy()
-)
-unconditional_sample_embeddings = np.repeat(
-    unconditional_embedding, len(sample_embeddings), axis=0
+sample_embeddings = generate_sample_embeddings()
+unconditional_sample_embeddings = generate_unconditional_embeddings(10)
+unconditional_test_embeddings = generate_unconditional_embeddings(
+    TrainConfig.batch_size
 )
 
 # %% [markdown]
@@ -84,9 +79,10 @@ unconditional_sample_embeddings = np.repeat(
 # %%
 df_train, df_val = train_test_split(df_train, test_size=0.2, random_state=RANDOM_STATE)
 df_train.head(2)
+
 # %%
 # train, val: (image, embedding) | test: (id, embedding)
-dataset_train = generate_dataset(df_train, "train", augment=False, method="all")
+dataset_train = generate_dataset(df_train, "train", augment=True, method="all")
 dataset_val = generate_dataset(df_val, "val", augment=False, method="all")
 dataset_test = generate_dataset(df_test, "test")
 
@@ -100,7 +96,7 @@ print(
 # ## Train
 
 # %%
-timestamp = datetime.now(timezone(timedelta(hours=8))).strftime("%Y%m%d_%H%M%S")
+timestamp = datetime.now(timezone(timedelta(hours=-8))).strftime("%Y%m%d_%H%M%S")
 
 ckpt_path = DirPath.checkpoint / "diffusion.ckpt"
 ckpt_callback = keras.callbacks.ModelCheckpoint(
@@ -113,10 +109,12 @@ ckpt_callback = keras.callbacks.ModelCheckpoint(
 ema_callback = EMACallback(TrainConfig.ema)
 plot_callback = SamplePlotCallback(
     sample_embeddings,
+    unconditional_sample_embeddings,
     TrainConfig.plot_diffusion_steps,
     num_rows=2,
     num_cols=5,
     plot_frequency=5,
+    cfg_scale=TrainConfig.cfg_scale,
 )
 pbar_callback = PBarCallback()
 
@@ -135,7 +133,7 @@ model.compile(
     normalizer=normalizer,
     optimizer=keras.optimizers.Lion(
         learning_rate=TrainConfig.lr_init,
-        weight_decay=TrainConfig.lr_decay,
+        weight_decay=TrainConfig.weight_decay,
     ),
     loss=keras.losses.mean_absolute_error,
 )
@@ -175,22 +173,8 @@ plt.legend()
 plt.show()
 
 # %%
-# model.load_weights(ckpt_path)
-
-for images, embeddings in dataset_train.take(1):
-    plt.imshow(images[0])
-    plt.show()
-
-    generated_images = model.generate(
-        num_images=1,
-        text_embs=embeddings[0:1],
-        diffusion_steps=50,
-    )
-    plt.imshow(generated_images[0])
-    plt.show()
-
-# %%
-# model.load_weights(ckpt_path)
+print("Load best model...")
+model.load_weights(ckpt_path)
 
 if (DirPath.output / "inference").exists():
     shutil.rmtree(DirPath.output / "inference")
@@ -199,7 +183,9 @@ if (DirPath.output / "inference").exists():
 
 test_epoch = len(df_test) // TrainConfig.batch_size + 1
 step = 0
-for id, text_embeddings in tqdm(dataset_test, total=test_epoch, colour="green"):
+for id, text_embeddings in tqdm(
+    dataset_test, total=test_epoch, desc="Generate image:", colour="green"
+):
     step += 1
     if step > test_epoch:
         break
@@ -207,7 +193,9 @@ for id, text_embeddings in tqdm(dataset_test, total=test_epoch, colour="green"):
     generated_images = model.generate(
         num_images=TrainConfig.batch_size,
         text_embs=text_embeddings,
+        un_text_embs=unconditional_test_embeddings,
         diffusion_steps=TrainConfig.plot_diffusion_steps,
+        cfg_scale=TrainConfig.cfg_scale,
     )
 
     for i, img in enumerate(generated_images):
@@ -218,41 +206,7 @@ for id, text_embeddings in tqdm(dataset_test, total=test_epoch, colour="green"):
             vmax=1.0,
         )
 
-# %% [markdown]
-# # ## Visualization
-
-
 # %%
-# # %%
-# # TODO: Rewrite the visualization code to match the new model
-# def merge(images, size):
-#     h, w = images.shape[1], images.shape[2]
-#     img = np.zeros((h * size[0], w * size[1], 3))
-#     for idx, image in enumerate(images):
-#         i = idx % size[1]
-#         j = idx // size[1]
-#         img[j * h : j * h + h, i * w : i * w + w, :] = image
-#     return img
-
-
-# def imsave(images, size, path):
-#     # getting the pixel values between [0, 1] to save it
-#     return plt.imsave(path, merge(images, size) * 0.5 + 0.5)
-
-
-# def save_images(images, size, image_path):
-#     return imsave(images, size, image_path)
-
-
-# def sample_generator(caption, batch_size):
-#     caption = np.asarray(caption)
-#     caption = caption.astype(np.int32)
-#     dataset = tf.data.Dataset.from_tensor_slices(caption)
-#     dataset = dataset.batch(batch_size)
-#     return dataset
-
-
-# # %%
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 
 os.chdir("./evaluation")

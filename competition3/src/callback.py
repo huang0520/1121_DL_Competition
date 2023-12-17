@@ -2,7 +2,9 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 from tensorflow import keras
-from tqdm import trange
+from tqdm import tqdm, trange
+
+from .metrics import KID
 
 
 class EMACallback(keras.callbacks.Callback):
@@ -36,10 +38,12 @@ class SamplePlotCallback(keras.callbacks.Callback):
     def __init__(
         self,
         sample_embeddings,
+        unconditional_sample_embeddings,
         diffusions_steps,
-        num_rows=2,
-        num_cols=5,
-        plot_frequency=5,
+        num_rows,
+        num_cols,
+        plot_frequency,
+        cfg_scale,
         save: bool = False,
         save_path: Path = None,
     ):
@@ -48,10 +52,12 @@ class SamplePlotCallback(keras.callbacks.Callback):
         assert save_path is not None if save else True
 
         self.sample_embeddings = sample_embeddings
+        self.unconditional_sample_embeddings = unconditional_sample_embeddings
         self.diffusions_steps = diffusions_steps
         self.n_row = num_rows
         self.n_col = num_cols
         self.plot_freq = plot_frequency
+        self.cfg_scale = cfg_scale
         self.save = save
         self.save_path = save_path
 
@@ -59,9 +65,11 @@ class SamplePlotCallback(keras.callbacks.Callback):
         if (epoch + 1) % self.plot_freq == 0:
             generate_images = self.model.plot_image(
                 self.sample_embeddings,
+                self.unconditional_sample_embeddings,
                 self.n_row,
                 self.n_col,
                 self.diffusions_steps,
+                self.cfg_scale,
             )
 
         if self.save:
@@ -74,15 +82,14 @@ class PBarCallback(keras.callbacks.Callback):
 
     def on_train_begin(self, logs=None):
         assert self.params["verbose"] == 0, "Set verbose=0 when using tqdm pbar"
-        self.pbar = trange(
-            self.params["steps"],
-            desc=f"Epoch 0/{self.params['epochs']}",
-            leave=True,
-            colour="green",
-        )
 
     def on_epoch_begin(self, epoch, logs=None):
-        self.pbar.set_description(f"Epoch {epoch + 1}/{self.params['epochs']}")
+        self.pbar = trange(
+            self.params["steps"],
+            desc=f"Epoch {epoch + 1}/{self.params['epochs']}",
+            colour="green",
+            unit="batch",
+        )
 
     def on_batch_end(self, batch, logs=None):
         self.pbar.update(1)
@@ -92,10 +99,15 @@ class PBarCallback(keras.callbacks.Callback):
             "velocity_loss": logs["velocity_loss"],
         })
 
+    def on_test_begin(self, logs=None):
+        self.pbar.colour = "blue"
+        self.pbar.refresh()
+
     def on_epoch_end(self, epoch, logs=None):
+        self.pbar.colour = "red"
         self.pbar.set_postfix({
             "val_image_loss": logs["val_image_loss"],
             "val_noise_loss": logs["val_noise_loss"],
             "val_velocity_loss": logs["val_velocity_loss"],
         })
-        self.pbar.reset()
+        self.pbar.close()

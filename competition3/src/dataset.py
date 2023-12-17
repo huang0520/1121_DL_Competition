@@ -8,7 +8,6 @@ from .config import (
     RANDOM_STATE,
     RNG_GENERATOR,
     DatasetConfig,
-    ModelConfig,
     TrainConfig,
 )
 
@@ -17,7 +16,6 @@ def load_image(path: tf.Tensor) -> tf.Tensor:
     image = tf.io.read_file(path)
     image = tf.image.decode_jpeg(image, channels=3)
     image = tf.image.convert_image_dtype(image, tf.float32)
-    image = tf.image.resize(image, (ModelConfig.image_size, ModelConfig.image_size))
     return image
 
 
