@@ -5,8 +5,7 @@
 import os
 import shutil
 from dataclasses import asdict, fields
-from datetime import datetime, timedelta, timezone
-from time import sleep
+from datetime import datetime
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
@@ -15,12 +14,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from icecream import ic, install
+from icecream import install
 from sklearn.model_selection import train_test_split
 from src.callback import EMACallback, PBarCallback, SamplePlotCallback
 from src.config import (
     RANDOM_STATE,
-    DatasetConfig,
     DirPath,
     ModelConfig,
     TrainConfig,
@@ -36,7 +34,7 @@ from src.preprocess import (
 )
 from src.utils import check_gpu
 from tensorflow import keras
-from tqdm import tqdm, trange
+from tqdm import tqdm
 
 check_gpu()
 install()
