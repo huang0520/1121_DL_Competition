@@ -1,5 +1,6 @@
 # Ignore log files
 *.log
+*.zip
 
 # Ignore OS-specific files
 .DS_Store
