@@ -22,3 +22,14 @@ logs/
 
 # Ignore file
 bfg-1.14.0.jar
+
+competition4/dataset
+competition4/evaluation
+competition4/output
+competition4/*ipynb
+competition4/model_funk_svd
+competition4/model_funk_svd_update
+
+
+
+ref/
