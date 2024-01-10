@@ -1,6 +1,7 @@
 # Ignore log files
 *.log
 
+
 # Ignore OS-specific files
 .DS_Store
 Thumbs.db
@@ -9,7 +10,9 @@ Thumbs.db
 model_saves/
 
 # Ignore folder
-output/
+competition1/output/
+competition2/output/
+competition3/output/
 input/
 data/
 catboost_info/
@@ -25,7 +28,7 @@ bfg-1.14.0.jar
 
 competition4/dataset
 competition4/evaluation
-competition4/output
+# competition4/output
 competition4/*ipynb
 competition4/model_funk_svd
 competition4/model_funk_svd_update

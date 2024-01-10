@@ -11,8 +11,13 @@
 
   // .py, .ipynb 使用 Ruff 格式化
   "[python]": {
-    "editor.defaultFormatter": "charliermarsh.ruff"
+    "editor.defaultFormatter": "ms-python.black-formatter"
   },
+  "black-formatter.args": [
+    "--line-length=100",
+    "--skip-string-normalization",
+    "--skip-magic-trailing-comma"
+  ],
 
   // 使用 Pylance 作為 Python LSP (Syntax-highlighting, Intellisense, Formatting, Refactoring, Linting, ...)
   "python.languageServer": "Pylance"
