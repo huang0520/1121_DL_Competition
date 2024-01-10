@@ -18,8 +18,11 @@ catboost_info/
 __pycache__/
 ckpts/
 checkpoints/
+checkpoint/
 evaluation/
 logs/
+dataset/
+reference/
 
 # Ignore file
 bfg-1.14.0.jar
