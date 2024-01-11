@@ -40,8 +40,7 @@ def cos_sim():
 
     return np.dot(embedding[0], embedding[1]) / (LA.norm(embedding[0]) * LA.norm(embedding[1]))
 
-
-cos_sim()
+# cos_sim()
 
 # %%
 os.environ["CUDA_VISIBLE_DEVICES"] = "1"
@@ -71,19 +70,20 @@ SLATE_SIZE = 5
 # %%
 LEARNING_RATE = 2e-5
 EMBEDDING_SIZE = 512
-N_EPOCHS = 2000
-TRAIN_EPISODES = 100
-COLLABRATIVE_SLATE_SIZE = 3
-CONTENT_SLATE_SIZE = 2
+N_EPOCHS = 2500
+TRAIN_EPISODES = 50
+COLLABRATIVE_SLATE_SIZE = 5
+CONTENT_SLATE_SIZE = 0
 
 
 # %%
 # Dataset paths
-USER_DATA = os.path.join("dataset", "user_data.json")
-ITEM_DATA = os.path.join("dataset", "item_data.json")
+USER_DATA = os.path.join("../dataset", "user_data.json")
+ITEM_DATA = os.path.join("../dataset", "item_data.json")
 
 # Output file path
 OUTPUT_PATH = os.path.join("output", "output_main.csv")
+
 
 # %%
 df_user = pd.read_json(USER_DATA, lines=True)
@@ -108,54 +108,58 @@ for uid in df_user.user_id:
         uids.append(uid)
         histories.append(his)
         ratings.append(1)
-uids = tf.convert_to_tensor(uids, dtype=tf.float32)
-histories = tf.convert_to_tensor(histories, dtype=tf.float32)
-ratings = tf.convert_to_tensor(ratings, dtype=tf.float32)
-print(type(uids))
-print(histories)
+# uids = tf.convert_to_tensor(uids, dtype=tf.float32)
+# histories = tf.convert_to_tensor(histories, dtype=tf.float32)
+# ratings = tf.convert_to_tensor(ratings, dtype=tf.float32)
+# print(type(uids))
+# print(df_user.at[uid, "history"])
+# df_user.at[uid, "history"].append(55)
+# print(df_user.at[uid, "history"])
+
+
 
 # %%
 # Content-based Model:
 
 
-# Compute the cosine similarity matrix
-cosine_sim = linear_kernel(tfidf_matrix, tfidf_matrix)
+# # Compute the cosine similarity matrix
+# cosine_sim = linear_kernel(tfidf_matrix, tfidf_matrix)
 
-# %%
-# Construct a reverse map of indices and movie titles
-indices = pd.Series(df_item_sample.index, index=df_item_sample['headline']).drop_duplicates()
+# # %%
+# # Construct a reverse map of indices and movie titles
+# indices = pd.Series(df_item_sample.index, index=df_item_sample['headline']).drop_duplicates()
 
 
 # %%
 # Function that takes in movie title as input and outputs most similar movies
-def get_recommendations(idx, cosine_sim=cosine_sim):
-    headline = df_item.at[idx, "headline"]
-    print(f"similar movie for id: {idx} - {headline}")
-    # Get the index of the movie that matches the title
-    # idx = indices[title]
+# def get_recommendations(idx, cosine_sim=cosine_sim):
+#     headline = df_item.at[idx, "headline"]
+#     print(f"similar movie for id: {idx} - {headline}")
+#     # Get the index of the movie that matches the title
+#     # idx = indices[title]
 
-    # Get the pairwsie similarity scores of all movies with that movie
-    sim_scores = list(enumerate(cosine_sim[idx]))
+#     # Get the pairwsie similarity scores of all movies with that movie
+#     sim_scores = list(enumerate(cosine_sim[idx]))
 
-    # Sort the movies based on the similarity scores
-    sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)
+#     # Sort the movies based on the similarity scores
+#     sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)
 
-    # Get the scores of the 10 most similar movies
-    sim_scores = sim_scores[1 : CONTENT_SLATE_SIZE + 1]
+#     # Get the scores of the 10 most similar movies
+#     sim_scores = sim_scores[1 : CONTENT_SLATE_SIZE + 1]
 
-    # Get the movie indices
-    movie_indices = [i[0] for i in sim_scores]
+#     # Get the movie indices
+#     movie_indices = [i[0] for i in sim_scores]
 
-    # Return the top 10 most similar movies
-    # return df_item['headline'].iloc[movie_indices]
+#     # Return the top 10 most similar movies
+#     # return df_item['headline'].iloc[movie_indices]
 
-    return df_item['item_id'].iloc[movie_indices].tolist()
+#     return df_item['item_id'].iloc[movie_indices].tolist()
 
 
 # %%
-content_recs = get_recommendations(165734)
-# print(type(content_recs))
-print(content_recs)
+# content_recs = get_recommendations(165734)
+# # print(type(content_recs))
+# print(content_recs)
 
 
 # %%
@@ -368,28 +372,29 @@ for _ in range(TRAIN_EPISODES):
         print(f'The current user is user {user_id}.')
 
         # Get the response of recommending the slate to the current user
-        collab_slate = model.eval_predict_onestep([user_id])
-        user_first_his = df_user.at[user_id, 'history'][0]
-        content_slate = get_recommendations(user_first_his)
-        print(type(content_slate))
+        slate = model.eval_predict_onestep([user_id])
+        # user_first_his = df_user.at[user_id, 'history'][0]
+        # content_slate = get_recommendations(user_first_his)
+        # print(type(content_slate))
 
-        slate = content_slate.append(collab_slate)
+        # slate = content_slate.append(collab_slate)
 
         clicked_id, in_environment = train_env.get_response(slate)
         uids_ = []
         histories_ = []
         ratings_ = []
+        for his in df_user.at[user_id, "history"]:
+            uids_.append(user_id)
+            histories_.append(his)
+            ratings_.append(1)
         for s in slate:
             uids_.append(user_id)
             histories_.append(s)
             if clicked_id == s:
                 ratings_.append(1)
-                # selected_slate[user_id].append(s)
-                # uids.append(user_id)
-                # histories.append(s)
-                # ratings.append(1)
+                df_user.at[uid, "history"].append(s)
             else:
-                ratings_.append(0)
+                ratings_.append(-1)
         model.eval_update_onestep(uids_, histories_, ratings_)
         if clicked_id != -1:
             print(
@@ -439,7 +444,7 @@ for _ in range(TEST_EPISODES):
             # model = tf.keras.models.load_model('model_funk_svd_update')
             # print(cur_user)
             collab_slate = model.eval_predict_onestep([cur_user])
-            content_slate = get_recommendations(df_user[0])
+            # content_slate = get_recommendations(df_user[0])
 
             # Get the response of the slate from the environment
             clicked_id, in_environment = test_env.get_response(slate)
@@ -447,16 +452,23 @@ for _ in range(TEST_EPISODES):
             # [TODO] Update your model here (optional)
             # [TODO] You can update your model at each step, or perform a batched update after some interval
             # [TODO] Code for updating your model...
+
             uids_ = []
             histories_ = []
             ratings_ = []
+            for his in df_user.at[cur_user, "history"]:
+                uids_.append(cur_user)
+                histories_.append(his)
+                ratings_.append(1)
             for s in slate:
                 uids_.append(cur_user)
                 histories_.append(s)
                 if clicked_id == s:
                     ratings_.append(1)
+                    df_user.at[uid, "history"].append(s)
                 else:
-                    ratings_.append(0)
+                    ratings_.append(-1)
+
             model.eval_update_onestep(uids_, histories_, ratings_)
             # model.save('model_funk_svd_update')
 
