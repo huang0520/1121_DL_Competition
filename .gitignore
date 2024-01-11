@@ -32,6 +32,8 @@ competition4/evaluation
 competition4/*ipynb
 competition4/model_funk_svd
 competition4/model_funk_svd_update
+model_funk_svd_update/
+model_funk_svd/
 
 
 
