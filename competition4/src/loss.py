@@ -3,8 +3,9 @@ from tensorflow import keras
 
 
 class PairwiseRankingLoss(keras.losses.Loss):
-    def __init__(self, name="pairwise_ranking_loss"):
+    def __init__(self, name="pairwise_ranking_loss", margin=1.0):
         super().__init__(name=name)
+        self.margin = margin
 
     def call(self, x1, x2):
         """
@@ -20,7 +21,7 @@ class PairwiseRankingLoss(keras.losses.Loss):
 
         """
 
-        return tf.math.maximum(1 - (x1 - x2), 0.0)
+        return tf.math.maximum(self.margin - (x1 - x2), 0.0)
 
     def get_config(self):
         return super().get_config()

@@ -1,4 +1,5 @@
 import random
+from time import time
 
 import pandas as pd
 import tensorflow as tf
@@ -9,32 +10,46 @@ class DatasetGenerator:
         df_user = pd.read_json(user_path, lines=True)
         df_item = pd.read_json(item_path, lines=True)
 
-        self.users, self.items = df_user.explode("history").to_numpy().T
-        self.users = self.users.tolist()
-        self.items = self.items.tolist()
-        self.pos_items = df_user["history"].to_list()
-        self.all_items = df_item["item_id"].to_list()
+        self.num_users = len(df_user)
+        self.num_items = len(df_item)
 
-    def __get_neg_item(self, user_id):
-        neg_items = list(set(self.all_items) - set(self.pos_items[user_id]))
-        return random.choice(neg_items)
-
-    def add_item(self, user_id, item_id):
-        self.users.append(user_id)
-        self.items.append(item_id)
-        self.pos_items[user_id].append(item_id)
+        self.pairs = set(df_user.explode("history").itertuples(index=False, name=None))
+        self.all_item_set = set(df_item["item_id"])
+        self.pos_item_lists = df_user["history"].to_list()
+        self.neg_item_lists = [
+            list(self.all_item_set - set(pos_item_list))
+            for pos_item_list in self.pos_item_lists
+        ]
 
     def __len__(self):
-        return len(self.users)
+        return len(self.pairs)
 
-    def __getitem__(self, idx):
-        return self.users[idx], self.items[idx], self.__get_neg_item(self.users[idx])
+    def __unzip_pairs(self, pairs):
+        return tuple(zip(*pairs))
+
+    def __add_item(self, user_id, item_id):
+        if (user_id, item_id) not in self.pairs:
+            self.pairs.add((user_id, item_id))
+            self.pos_item_lists[user_id].append(item_id)
+            self.neg_item_lists[user_id].remove(item_id)
+            return True
+        return False
+
+    def add_items(self, user_ids, item_ids):
+        add_check_list = [
+            self.__add_item(user_id, item_id)
+            for user_id, item_id in zip(user_ids, item_ids)
+        ]
+
+        return sum(add_check_list)
 
     def __get_curr_generator(self):
         """
         Returns a generator that yields elements from the current dataset.
         """
-        yield from (self[i] for i in range(len(self)))
+        users, items = self.__unzip_pairs(self.pairs)
+        neg_items = [random.choice(self.neg_item_lists[user_id]) for user_id in users]
+        yield from zip(users, items, neg_items)
 
     def generate(self, batch_size):
         dataset: tf.data.Dataset = tf.data.Dataset.from_generator(
@@ -42,14 +57,29 @@ class DatasetGenerator:
             output_types=(tf.int32, tf.int32, tf.int32),
         )
         dataset = dataset.shuffle(buffer_size=batch_size * 10)
-        dataset = dataset.batch(batch_size, num_parallel_calls=tf.data.AUTOTUNE)
+        dataset = dataset.batch(
+            batch_size, drop_remainder=True, num_parallel_calls=tf.data.AUTOTUNE
+        )
         dataset = dataset.prefetch(tf.data.AUTOTUNE)
-
         return dataset
 
 
 if __name__ == "__main__":
-    dataset = DatasetGenerator("./dataset/user_data.json", "./dataset/item_data.json")
+    curr_time = time()
+    dataset_generator = DatasetGenerator(
+        "./dataset/user_data.json", "./dataset/item_data.json"
+    )
+    print(f"Create generator: {time() - curr_time:.2f}s")
+    curr_time = time()
 
-    for data in dataset.generate(32).take(1):
-        print(data)
+    dataset = dataset_generator.generate(16)
+    print(f"Create dataset: {time() - curr_time:.2f}s")
+    curr_time = time()
+
+    for data in dataset.take(1):
+        print((data[0][0].numpy(), data[1][0].numpy()) in dataset_generator.pairs)
+    print(f"Take 1 from dataset: {time() - curr_time:.2f}s")
+
+    print(f"#New items: {dataset_generator.add_items((0, 0, 1), (1, 1, 2))}")
+
+    print(len(dataset_generator))

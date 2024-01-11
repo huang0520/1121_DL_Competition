@@ -1,7 +1,8 @@
 import tensorflow as tf
-from dataset import DatasetGenerator
-from loss import PairwiseRankingLoss
 from tensorflow import keras
+
+from .dataset import DatasetGenerator
+from .loss import PairwiseRankingLoss
 
 
 class FunkSVDRecommender(tf.keras.Model):
@@ -111,19 +112,22 @@ class FunkSVDRecommender(tf.keras.Model):
 class NeuMF(tf.keras.Model):
     def __init__(self, num_factors, num_users, num_items, nums_hiddens, **kwargs):
         super().__init__(self, **kwargs)
+        self.num_users = num_users
+        self.num_items = num_items
+
         self.P = keras.layers.Embedding(num_users, num_factors)
         self.Q = keras.layers.Embedding(num_items, num_factors)
         self.U = keras.layers.Embedding(num_users, num_factors)
         self.V = keras.layers.Embedding(num_items, num_factors)
 
         self.mlp = keras.Sequential([
-            keras.layers.Dense(num_hiddens, activation="relu")
+            keras.layers.Dense(num_hiddens, activation="mish")
             for num_hiddens in nums_hiddens
         ])
 
         self.output_layer = keras.layers.Dense(1, activation="sigmoid", use_bias=False)
 
-    def compute(self, user_ids, item_ids):
+    def _compute(self, user_ids, item_ids):
         p_mf = self.P(user_ids)
         q_mf = self.Q(item_ids)
         gmf = p_mf * q_mf
@@ -140,12 +144,13 @@ class NeuMF(tf.keras.Model):
     def _get_hit(self, ranklist, predict_items, k=5):
         pass
 
+    @tf.function
     def train_step(self, inputs):
         user_ids, item_ids, neg_item_ids = inputs
 
         with tf.GradientTape() as tape:
-            p_pos = self.compute(user_ids, item_ids)
-            p_neg = self.compute(user_ids, neg_item_ids)
+            p_pos = self._compute(user_ids, item_ids)
+            p_neg = self._compute(user_ids, neg_item_ids)
             loss = self.loss(p_pos, p_neg)
 
         gradients = tape.gradient(loss, self.trainable_variables)
@@ -153,23 +158,46 @@ class NeuMF(tf.keras.Model):
 
         return loss
 
+    @tf.function
+    def _get_rank_lists(self, user_id, num_items):
+        # users = tf.range(num_users)
+        users = user_id
+        items = tf.range(num_items)
+
+        user_ids = tf.repeat(users, num_items)
+        # item_ids = tf.tile(items, [num_users])
+        item_ids = items
+
+        predictions = self._compute(user_ids, item_ids)
+        predictions = tf.squeeze(tf.reshape(predictions, [1, -1]))
+
+        return tf.argsort(predictions, direction="DESCENDING")
+
+    def get_topn(self, user_id, n=5):
+        rank_lists = self._get_rank_lists(
+            tf.constant(user_id), tf.constant(self.num_items)
+        )
+        return rank_lists[:n]
+
 
 if __name__ == "__main__":
     num_users = 10
-    num_items = 2000000
+    num_items = 100
 
     model = NeuMF(64, num_users, num_items, [10, 10, 10])
     model.compile(optimizer="adam", loss=PairwiseRankingLoss())
 
-    dataset_generator = DatasetGenerator(
-        "./dataset/user_data.json", "./dataset/item_data.json"
-    )
-    dataset = dataset_generator.generate(16)
+    print(model.get_topn(5, 5))
 
-    losses = []
-    for data in dataset.take(10):
-        # loss = model.train_step(data)
-        loss = model.train_step(data)
-        losses.append(loss.numpy())
+    # dataset_generator = DatasetGenerator(
+    #     "./dataset/user_data.json", "./dataset/item_data.json"
+    # )
+    # dataset = dataset_generator.generate(16)
 
-    print(losses)
+    # losses = []
+    # for data in dataset.take(10):
+    #     # loss = model.train_step(data)
+    #     loss = model.train_step(data)
+    #     losses.append(loss.numpy())
+
+    # print(losses)

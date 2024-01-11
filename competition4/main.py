@@ -5,7 +5,7 @@ import random
 from dataclasses import dataclass
 from pathlib import Path
 
-os.environ["VISIBLE_CUDA_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 
 import matplotlib.pyplot as plt
@@ -13,8 +13,11 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 from evaluation.environment import TestingEnvironment, TrainingEnvironment
-from src.recommender import FunkSVDRecommender
-from tqdm import tqdm, trange
+from src.dataset import DatasetGenerator
+from src.loss import PairwiseRankingLoss
+from src.recommender import FunkSVDRecommender, NeuMF
+from tensorflow import keras
+from tqdm.auto import tqdm, trange
 from transformers import BertModel, BertTokenizer
 
 # %% Check GPU
@@ -46,11 +49,14 @@ class ConstParams:
 
 @dataclass
 class HParams:
-    EMBED_SIZE: int = 256
-    BATCH_SIZE: int = 32
-    LEARNING_RATE: float = 0.004
+    EMBED_SIZE: int = 64
+    BATCH_SIZE: int = 128
+    LEARNING_RATE: float = 0.00005
+    WEIGHT_DECAY: float = 0.003
     RANDOM_STATE: int = 42
-    NUM_EPOCHS: int = 25
+    NUM_EPOCHS: int = 10
+    NUM_EPOSIDES: int = 200
+    NUMS_HIDDENS: tuple[int] = (32, 32, 32, 32)
 
 
 @dataclass
@@ -65,56 +71,86 @@ random.seed(HParams.RANDOM_STATE)
 
 
 # %% Load data
-# user_id, history (last 3 clicked items)
-df_user = pd.read_json(Paths.USER_DATA, lines=True)
-# item_id, headline, short_description
-df_item = pd.read_json(Paths.ITEM_DATA, lines=True)
+# # user_id, history (last 3 clicked items)
+# df_user = pd.read_json(Paths.USER_DATA, lines=True)
+# # item_id, headline, short_description
+# df_item = pd.read_json(Paths.ITEM_DATA, lines=True)
+
+
+# %%
+# Training pipeline
+def train(model, dataset):
+    loss_record = []
+
+    pbar = trange(HParams.NUM_EPOCHS, desc="Training", ncols=60)
+    for _ in pbar:
+        losses = [model.train_step(data) for data in dataset]
+        loss = tf.reduce_mean(losses).numpy()
+        loss_record.append(loss)
+        pbar.set_postfix({"loss": loss})
+    pbar.set_postfix({"loss": np.mean(loss_record)}, refresh=True)
+
+    return model, loss_record
+
+
+# Explore pipeline
+def explore(env, model: NeuMF, slate_size=5):
+    hit_pairs = []
+
+    pbar = tqdm(desc="Exploring")
+    while env.has_next_state():
+        user_id = env.get_state()
+        slate = model.get_topn(user_id, slate_size)
+        clicked_id, _ = env.get_response(slate)
+
+        if clicked_id != -1:
+            hit_pairs.append((user_id, clicked_id))
+
+        pbar.update(1)
+        pbar.set_postfix({"#click": len(hit_pairs)})
+
+    return hit_pairs
+
+
+# Simulate pipeline
+def explore_and_train(env, model: NeuMF, dataset_generator: DatasetGenerator):
+    for i in range(HParams.NUM_EPOSIDES):
+        print(f"[Eposide {i + 1}/{HParams.NUM_EPOSIDES}]")
+
+        # Explore
+        env.reset()
+        add_pairs = explore(env, model, ConstParams.SLATE_SIZE)
+
+        # Add new items
+        num_new_items = dataset_generator.add_items(*zip(*add_pairs))
+        print(f"Add {num_new_items} new items to the dataset")
+
+        # Train
+        dataset = dataset_generator.generate(HParams.BATCH_SIZE)
+        model, _ = train(model, dataset)
+
+        print(f"Average Score: {np.mean(env.get_score()):.6f}")
+    return model
+
 
 # %% Training
 # Init
-model = FunkSVDRecommender(
-    m_users=ConstParams.N_TRAIN_USERS,
-    n_items=ConstParams.N_ITEMS,
-    embedding_size=HParams.EMBED_SIZE,
-    learning_rate=HParams.LEARNING_RATE,
+model = NeuMF(
+    HParams.EMBED_SIZE,
+    ConstParams.N_TRAIN_USERS,
+    ConstParams.N_ITEMS,
+    HParams.NUMS_HIDDENS,
 )
+model.compile(
+    optimizer=keras.optimizers.Lion(
+        HParams.LEARNING_RATE, weight_decay=HParams.WEIGHT_DECAY
+    ),
+    loss=PairwiseRankingLoss(margin=0.2),
+)
+dataset_generator = DatasetGenerator(Paths.USER_DATA, Paths.ITEM_DATA)
 train_env = TrainingEnvironment()
 
-# Pre-training with history
-history: np.ndarray = df_user.explode("history").reset_index(drop=True).to_numpy()
-history: np.ndarray = np.hstack((history, np.ones((history.shape[0], 1)))).astype(float)
-dataset: tf.data.Dataset = (
-    tf.data.Dataset.from_tensor_slices(history)
-    .shuffle(buffer_size=len(history))
-    .batch(HParams.BATCH_SIZE, num_parallel_calls=tf.data.AUTOTUNE)
-    .prefetch(tf.data.AUTOTUNE)
-)
-
-print("[Pre-training]")
-for _ in trange(HParams.NUM_EPOCHS):
-    _ = [model.train_step(data) for data in dataset]
-
-# Initialize the training environment
-print("[Training]")
-for epoch in range(HParams.NUM_EPOCHS):
-    train_env.reset()
-    losses = []
-
-    pbar = tqdm(desc=f"Epoch {epoch}")
-    while train_env.has_next_state():
-        user_id = train_env.get_state()
-        slate = model.recommand_top5([user_id])
-        clicked_id, in_environment = train_env.get_response(slate)
-
-        data = tf.convert_to_tensor([(user_id, x, int(x == clicked_id)) for x in slate])
-
-        loss = model.train_step(data)
-        losses.append(loss)
-
-        pbar.update(1)
-    pbar.set_postfix({"loss": np.mean(losses), "score": np.mean(train_env.get_score())})
-    pbar.close()
-
+model = explore_and_train(train_env, model, dataset_generator)
 
 # %% Testing
 # Initialize the testing environment
@@ -128,7 +164,6 @@ item_ids = list(range(ConstParams.N_ITEMS))
 for epoch in range(ConstParams.TEST_EPISODES):
     # [TODO] Load your model weights here (in the beginning of each testing episode)
     # [TODO] Code for loading your model weights...
-    model = tf.keras.models.load_model(Paths.CHECKPOINT_DIR / "model")
 
     # Start the testing process
     with tqdm(desc="Testing") as pbar:
@@ -140,7 +175,7 @@ for epoch in range(ConstParams.TEST_EPISODES):
             # [TODO] Employ your recommendation policy to generate a slate of 5 distinct items
             # [TODO] Code for generating the recommended slate...
             # Here we provide a simple random implementation
-            slate = model.recommand_top5([user_id])
+            slate = model.get_topn(cur_user, 5)
 
             # Get the response of the slate from the environment
             clicked_id, in_environment = test_env.get_response(slate)
@@ -160,7 +195,6 @@ for epoch in range(ConstParams.TEST_EPISODES):
 
     # [TODO] Delete or reset your model weights here (in the end of each testing episode)
     # [TODO] Code for deleting your model weights...
-    del model
 
 # Calculate the average scores
 avg_scores = [np.average(score) for score in zip(*scores)]
