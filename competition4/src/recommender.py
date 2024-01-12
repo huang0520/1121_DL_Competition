@@ -1,18 +1,17 @@
 import tensorflow as tf
 from tensorflow import keras
 
-from .dataset import DatasetGenerator
+from .dataset import DatasetGenerator, OneHotDatasetGenerator
+from .layer import FMLayer
 from .loss import PairwiseRankingLoss
 
 
-class FunkSVDRecommender(tf.keras.Model):
+class FunkSVD(tf.keras.Model):
     """
     Simplified Funk-SVD recommender model
     """
 
-    def __init__(
-        self, m_users: int, n_items: int, embedding_size: int, learning_rate: float
-    ):
+    def __init__(self, m_users: int, n_items: int, embedding_size: int):
         """
         Constructor of the model
         """
@@ -20,93 +19,59 @@ class FunkSVDRecommender(tf.keras.Model):
         self.m = m_users
         self.n = n_items
         self.k = embedding_size
-        self.lr = learning_rate
 
-        # user embeddings P
-        self.P = tf.Variable(
-            tf.keras.initializers.RandomNormal()(shape=(self.m, self.k))
-        )
+        self.P = keras.layers.Embedding(self.m, self.k)
+        self.Q = keras.layers.Embedding(self.n, self.k)
 
-        # item embeddings Q
-        self.Q = tf.Variable(
-            tf.keras.initializers.RandomNormal()(shape=(self.n, self.k))
-        )
-
-        # optimizer
-        self.optimizer = tf.optimizers.Adam(learning_rate=self.lr)
+        self.B_user = keras.layers.Embedding(self.m, 1)
+        self.B_item = keras.layers.Embedding(self.n, 1)
 
     @tf.function
-    def call(self, user_ids: tf.Tensor, item_ids: tf.Tensor) -> tf.Tensor:
+    def call(self, inputs) -> tf.Tensor:
         """
         Forward pass used in training and validating
         """
-        # dot product the user and item embeddings corresponding to the observed interaction pairs to produce predictions
-        y_pred = tf.reduce_sum(
-            tf.gather(self.P, indices=user_ids) * tf.gather(self.Q, indices=item_ids),
-            axis=1,
-        )
+        user_ids, item_ids = inputs
+        p = self.P(user_ids)
+        q = self.Q(item_ids)
+        b_user = self.B_user(user_ids)
+        b_item = self.B_item(item_ids)
 
-        return y_pred
-
-    @tf.function
-    def compute_loss(self, y_true: tf.Tensor, y_pred: tf.Tensor) -> tf.Tensor:
-        """
-        Compute the MSE loss of the model
-        """
-        loss = tf.losses.mean_squared_error(y_true, y_pred)
-
-        return loss
+        return tf.matmul(p, q, transpose_b=True) + b_user + b_item
 
     @tf.function
-    def train_step(self, data: tf.Tensor) -> tf.Tensor:
+    def train_step(self, inputs: tf.Tensor) -> tf.Tensor:
         # data: user_id, item_id, rating
-        user_ids = tf.cast(data[:, 0], dtype=tf.int32)
-        item_ids = tf.cast(data[:, 1], dtype=tf.int32)
-        y_true = tf.cast(data[:, 2], dtype=tf.float32)
+        user_ids, pos_item_ids, neg_item_ids = inputs
 
         # compute loss
         with tf.GradientTape() as tape:
-            y_pred = self(user_ids, item_ids)
-            loss = self.compute_loss(y_true, y_pred)
+            p_pos = self((user_ids, pos_item_ids))
+            n_pos = self((user_ids, neg_item_ids))
+            loss = self.loss(p_pos, n_pos)
 
-        # compute gradients
         gradients = tape.gradient(loss, self.trainable_variables)
-
-        # update weights
         self.optimizer.apply_gradients(zip(gradients, self.trainable_variables))
 
         return loss
 
+    def update(self, user_id, item_ids, clicked_id):
+        item_ids = tf.convert_to_tensor(
+            tuple(filter(lambda x: x != clicked_id, item_ids))
+        )
+        user_ids = tf.repeat(user_id, len(item_ids))
+        clicked_ids = tf.repeat(clicked_id, len(item_ids))
+        self.train_step((user_ids, item_ids, clicked_ids))
+
     @tf.function
-    def val_step(self, data: tf.Tensor) -> tf.Tensor:
-        """
-        Validate the model with one batch
-        data: batched user-item interactions
-        each record in data is in the format [UserID, MovieID, Rating, Timestamp]
-        """
-        user_ids = tf.cast(data[:, 0], dtype=tf.int32)
-        item_ids = tf.cast(data[:, 1], dtype=tf.int32)
-        y_true = tf.cast(data[:, 2], dtype=tf.float32)
+    def __get_rank_list(self, user_id):
+        p = self.P(user_id)
+        q = self.Q(tf.range(self.n))
+        return tf.matmul(p, q, transpose_b=True)
 
-        # compute loss
-        y_pred = self(user_ids, item_ids)
-        loss = self.compute_loss(y_true, y_pred)
-
-        return loss
-
-    def recommand_top5(self, query: tf.Tensor) -> tf.Tensor:
-        """
-        Predict the top 5 item_ids for each user_id in query
-        query: user_id
-        """
-        # dot product the selected user and all item embeddings to produce predictions
-        user_id = tf.cast(query[0], tf.int32)
-        y_pred = tf.reduce_sum(tf.gather(self.P, user_id) * self.Q, axis=1)
-
-        # select the top 10 items with highest scores in y_pred
-        y_top_5 = tf.math.top_k(y_pred, k=5).indices
-
-        return y_top_5
+    def get_topk(self, user_id, k=5) -> tf.Tensor:
+        rank_list = self.__get_rank_list(tf.constant(user_id))
+        return tf.math.top_k(rank_list, k=k).indices.numpy()
 
 
 class NeuMF(tf.keras.Model):
@@ -121,13 +86,15 @@ class NeuMF(tf.keras.Model):
         self.V = keras.layers.Embedding(num_items, num_factors)
 
         self.mlp = keras.Sequential([
-            keras.layers.Dense(num_hiddens, activation="mish")
+            keras.layers.Dense(num_hiddens, activation=keras.activations.relu)
             for num_hiddens in nums_hiddens
         ])
 
         self.output_layer = keras.layers.Dense(1, activation="sigmoid", use_bias=False)
 
-    def _compute(self, user_ids, item_ids):
+    def call(self, inputs):
+        user_ids, item_ids = inputs
+
         p_mf = self.P(user_ids)
         q_mf = self.Q(item_ids)
         gmf = p_mf * q_mf
@@ -138,56 +105,67 @@ class NeuMF(tf.keras.Model):
 
         return self.output_layer(tf.concat([gmf, mlp], axis=1))
 
-    def compile(self, optimizer, loss):
-        super().compile(optimizer, loss)
+    @tf.function
+    def train_step(self, inputs):
+        user_ids, pos_item_ids, neg_item_ids = inputs
 
-    def _get_hit(self, ranklist, predict_items, k=5):
-        pass
+        with tf.GradientTape() as tape:
+            p_pos = self((user_ids, pos_item_ids))
+            p_neg = self((user_ids, neg_item_ids))
+            loss = self.loss(p_pos, p_neg)
+        gradients = tape.gradient(loss, self.trainable_variables)
+        self.optimizer.apply_gradients(zip(gradients, self.trainable_variables))
+
+        return loss
+
+    def get_topk(self, user_id, k=5):
+        item_probs = self((
+            tf.repeat(tf.constant(user_id), self.num_items),
+            tf.range(self.num_items),
+        ))
+        return tf.math.top_k(tf.squeeze(item_probs), k=k).indices.numpy()
+
+
+class FM(keras.Model):
+    def __init__(self, k=8, w_reg=1e-4, v_reg=1e-4, **kwargs):
+        super().__init__(**kwargs)
+        self.fm = FMLayer(k, w_reg, v_reg)
+
+    @tf.function
+    def call(self, inputs):
+        fm_output = self.fm(inputs)
+        output = tf.nn.sigmoid(fm_output)
+        return output
 
     @tf.function
     def train_step(self, inputs):
-        user_ids, item_ids, neg_item_ids = inputs
+        x, y_true = inputs
 
         with tf.GradientTape() as tape:
-            p_pos = self._compute(user_ids, item_ids)
-            p_neg = self._compute(user_ids, neg_item_ids)
-            loss = self.loss(p_pos, p_neg)
+            y_pred = self(x, training=True)
+            loss = self.loss(y_true, y_pred)
 
         gradients = tape.gradient(loss, self.trainable_variables)
         self.optimizer.apply_gradients(zip(gradients, self.trainable_variables))
 
         return loss
 
-    @tf.function
-    def _get_rank_lists(self, user_id, num_items):
-        # users = tf.range(num_users)
-        users = user_id
-        items = tf.range(num_items)
+    # @tf.function
+    def __get_rank_list(self, user_id, num_users, num_items):
+        pass
 
-        user_ids = tf.repeat(users, num_items)
-        # item_ids = tf.tile(items, [num_users])
-        item_ids = items
-
-        predictions = self._compute(user_ids, item_ids)
-        predictions = tf.squeeze(tf.reshape(predictions, [1, -1]))
-
-        return tf.argsort(predictions, direction="DESCENDING")
-
-    def get_topn(self, user_id, n=5):
-        rank_lists = self._get_rank_lists(
-            tf.constant(user_id), tf.constant(self.num_items)
-        )
-        return rank_lists[:n]
+    def get_topn(self, user_id, n=5, num_users=2000, num_items=209527):
+        pass
 
 
 if __name__ == "__main__":
     num_users = 10
     num_items = 100
 
-    model = NeuMF(64, num_users, num_items, [10, 10, 10])
+    model = FM()
     model.compile(optimizer="adam", loss=PairwiseRankingLoss())
 
-    print(model.get_topn(5, 5))
+    # dataset_generator
 
     # dataset_generator = DatasetGenerator(
     #     "./dataset/user_data.json", "./dataset/item_data.json"

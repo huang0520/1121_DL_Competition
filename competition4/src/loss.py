@@ -3,7 +3,7 @@ from tensorflow import keras
 
 
 class PairwiseRankingLoss(keras.losses.Loss):
-    def __init__(self, name="pairwise_ranking_loss", margin=1.0):
+    def __init__(self, margin=0.3, name="pairwise_ranking_loss"):
         super().__init__(name=name)
         self.margin = margin
 

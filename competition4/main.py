@@ -3,6 +3,7 @@ import itertools
 import os
 import random
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "1"
@@ -15,7 +16,7 @@ import tensorflow as tf
 from evaluation.environment import TestingEnvironment, TrainingEnvironment
 from src.dataset import DatasetGenerator
 from src.loss import PairwiseRankingLoss
-from src.recommender import FunkSVDRecommender, NeuMF
+from src.recommender import FunkSVD, NeuMF
 from tensorflow import keras
 from tqdm.auto import tqdm, trange
 from transformers import BertModel, BertTokenizer
@@ -55,8 +56,8 @@ class HParams:
     WEIGHT_DECAY: float = 0.003
     RANDOM_STATE: int = 42
     NUM_EPOCHS: int = 10
-    NUM_EPOSIDES: int = 200
-    NUMS_HIDDENS: tuple[int] = (32, 32, 32, 32)
+    NUM_EPOSIDES: int = 100
+    NUMS_HIDDENS: tuple[int] = (16, 16, 16)
 
 
 @dataclass
@@ -70,156 +71,241 @@ class Paths:
 random.seed(HParams.RANDOM_STATE)
 
 
-# %% Load data
-# # user_id, history (last 3 clicked items)
-# df_user = pd.read_json(Paths.USER_DATA, lines=True)
-# # item_id, headline, short_description
-# df_item = pd.read_json(Paths.ITEM_DATA, lines=True)
-
-
 # %%
 # Training pipeline
 def train(model, dataset):
     loss_record = []
 
-    pbar = trange(HParams.NUM_EPOCHS, desc="Training", ncols=60)
+    pbar = trange(HParams.NUM_EPOCHS, desc="Training", ncols=0)
     for _ in pbar:
         losses = [model.train_step(data) for data in dataset]
-        loss = tf.reduce_mean(losses).numpy()
-        loss_record.append(loss)
-        pbar.set_postfix({"loss": loss})
+        loss_record.append(tf.reduce_mean(losses).numpy())
+        pbar.set_postfix({"loss": loss_record[-1]})
     pbar.set_postfix({"loss": np.mean(loss_record)}, refresh=True)
 
     return model, loss_record
 
 
-# Explore pipeline
-def explore(env, model: NeuMF, slate_size=5):
-    hit_pairs = []
+def update(model, dataset_generator, user_id, slate, clicked_id):
+    neg_item_ids = slate[slate != clicked_id]
 
-    pbar = tqdm(desc="Exploring")
+    if clicked_id != -1:
+        dataset_generator.add_item(user_id, clicked_id)
+        pos_item_ids = tf.convert_to_tensor([clicked_id] * len(neg_item_ids))
+
+    elif clicked_id == -1:
+        pos_item_tuple = tuple(dataset_generator.pos_item_sets[user_id])
+        if len(pos_item_tuple) < len(neg_item_ids):
+            pos_item_ids = pos_item_tuple + tuple(
+                random.sample(pos_item_tuple, len(neg_item_ids) - len(pos_item_tuple))
+            )
+
+        elif len(pos_item_tuple) >= len(neg_item_ids):
+            pos_item_ids = random.sample(pos_item_tuple, len(neg_item_ids))
+
+    user_ids = tf.convert_to_tensor([user_id] * len(neg_item_ids))
+    pos_item_ids = tf.convert_to_tensor(pos_item_ids)
+    neg_item_ids = tf.convert_to_tensor(neg_item_ids)
+    _ = model.train_step((user_ids, pos_item_ids, neg_item_ids))
+
+    return model
+
+
+# Explore pipeline
+def explore_with_update(env, model, dataset_generator, slate_size=5):
+    hit_count = 0
+
+    pbar = tqdm(desc="Explore & Update")
     while env.has_next_state():
         user_id = env.get_state()
-        slate = model.get_topn(user_id, slate_size)
+        slate = model.get_topk(user_id, slate_size)
         clicked_id, _ = env.get_response(slate)
 
-        if clicked_id != -1:
-            hit_pairs.append((user_id, clicked_id))
+        model = update(model, dataset_generator, user_id, slate, clicked_id)
+        hit_count += 1 if clicked_id != -1 else 0
 
         pbar.update(1)
-        pbar.set_postfix({"#click": len(hit_pairs)})
+        pbar.set_postfix({"#click": hit_count})
 
-    return hit_pairs
+    return model, hit_count
 
 
 # Simulate pipeline
-def explore_and_train(env, model: NeuMF, dataset_generator: DatasetGenerator):
+def explore_and_train(
+    model, dataset_generator: DatasetGenerator, checkpoint_dir, transfer=False
+):
+    checkpoint = tf.train.Checkpoint(model=model)
+    ckpt_manager = tf.train.CheckpointManager(checkpoint, checkpoint_dir, max_to_keep=1)
+    if transfer:
+        checkpoint.restore(ckpt_manager.latest_checkpoint)
+        print(f"Model restored from {ckpt_manager.latest_checkpoint}.")
+
+    env = TrainingEnvironment()
+
     for i in range(HParams.NUM_EPOSIDES):
-        print(f"[Eposide {i + 1}/{HParams.NUM_EPOSIDES}]")
-
-        # Explore
-        env.reset()
-        add_pairs = explore(env, model, ConstParams.SLATE_SIZE)
-
-        # Add new items
-        num_new_items = dataset_generator.add_items(*zip(*add_pairs))
-        print(f"Add {num_new_items} new items to the dataset")
+        print("=" * 5 + f" Eposide {i + 1}/{HParams.NUM_EPOSIDES} " + "=" * 5)
 
         # Train
         dataset = dataset_generator.generate(HParams.BATCH_SIZE)
         model, _ = train(model, dataset)
 
+        # Explore and update
+        env.reset()
+        model, _ = explore_with_update(
+            env, model, dataset_generator, ConstParams.SLATE_SIZE
+        )
         print(f"Average Score: {np.mean(env.get_score()):.6f}")
+
+        # Save checkpoint
+        ckpt_manager.save()
     return model
 
 
-# %% Training
-# Init
-model = NeuMF(
-    HParams.EMBED_SIZE,
-    ConstParams.N_TRAIN_USERS,
-    ConstParams.N_ITEMS,
-    HParams.NUMS_HIDDENS,
-)
-model.compile(
-    optimizer=keras.optimizers.Lion(
-        HParams.LEARNING_RATE, weight_decay=HParams.WEIGHT_DECAY
-    ),
-    loss=PairwiseRankingLoss(margin=0.2),
-)
-dataset_generator = DatasetGenerator(Paths.USER_DATA, Paths.ITEM_DATA)
-train_env = TrainingEnvironment()
+def test(model, dataset_generator, checkpoint_dir, update_freq=1000):
+    test_env = TestingEnvironment()
+    scores = []
 
-model = explore_and_train(train_env, model, dataset_generator)
+    # The item_ids here is for the random recommender
+    item_ids = list(range(ConstParams.N_ITEMS))
 
-# %% Testing
-# Initialize the testing environment
-test_env = TestingEnvironment()
-scores = []
+    # Repeat the testing process for 5 times
+    for epoch in range(ConstParams.TEST_EPISODES):
+        # [TODO] Load your model weights here (in the beginning of each testing episode)
+        # [TODO] Code for loading your model weights...
+        checkpoint = tf.train.Checkpoint(model=model)
+        checkpoint.restore(tf.train.latest_checkpoint(checkpoint_dir))
 
-# The item_ids here is for the random recommender
-item_ids = list(range(ConstParams.N_ITEMS))
+        num_iter = 0
+        add_items = []
 
-# Repeat the testing process for 5 times
-for epoch in range(ConstParams.TEST_EPISODES):
-    # [TODO] Load your model weights here (in the beginning of each testing episode)
-    # [TODO] Code for loading your model weights...
+        # Start the testing process
+        with tqdm(desc="Testing") as pbar:
+            # Run as long as there exist some active users
+            while test_env.has_next_state():
+                # Get the current user id
+                cur_user = test_env.get_state()
 
-    # Start the testing process
-    with tqdm(desc="Testing") as pbar:
-        # Run as long as there exist some active users
-        while test_env.has_next_state():
-            # Get the current user id
-            cur_user = test_env.get_state()
+                # [TODO] Employ your recommendation policy to generate a slate of 5 distinct items
+                # [TODO] Code for generating the recommended slate...
+                # Here we provide a simple random implementation
+                slate = model.get_topk(cur_user, 5)
 
-            # [TODO] Employ your recommendation policy to generate a slate of 5 distinct items
-            # [TODO] Code for generating the recommended slate...
-            # Here we provide a simple random implementation
-            slate = model.get_topn(cur_user, 5)
+                # Get the response of the slate from the environment
+                clicked_id, in_environment = test_env.get_response(slate)
 
-            # Get the response of the slate from the environment
-            clicked_id, in_environment = test_env.get_response(slate)
+                # [TODO] Update your model here (optional)
+                # [TODO] You can update your model at each step, or perform a batched update after some interval
+                # [TODO] Code for updating your model...
+                num_iter += 1
+                if clicked_id != -1:
+                    add_items.append((cur_user, clicked_id))
 
-            # [TODO] Update your model here (optional)
-            # [TODO] You can update your model at each step, or perform a batched update after some interval
-            # [TODO] Code for updating your model...
+                if num_iter % update_freq == 0:
+                    dataset_generator.add_items(*zip(*add_items))
+                    dataset = dataset_generator.generate(HParams.BATCH_SIZE)
+                    model, _ = train(model, dataset)
 
-            # Update the progress indicator
-            pbar.update(1)
+                # Update the progress indicator
+                pbar.update(1)
 
-    # Record the score of this testing episode
-    scores.append(test_env.get_score())
+        # Record the score of this testing episode
+        scores.append(test_env.get_score())
 
-    # Reset the testing environment
-    test_env.reset()
+        # Reset the testing environment
+        test_env.reset()
 
-    # [TODO] Delete or reset your model weights here (in the end of each testing episode)
-    # [TODO] Code for deleting your model weights...
+        # [TODO] Delete or reset your model weights here (in the end of each testing episode)
+        # [TODO] Code for deleting your model weights...
+        checkpoint.restore(tf.train.latest_checkpoint(checkpoint_dir))
 
-# Calculate the average scores
-avg_scores = [np.average(score) for score in zip(*scores)]
+    # Calculate the average scores
+    avg_scores = [np.average(score) for score in zip(*scores)]
 
-# Generate a DataFrame to output the result in a .csv file
-df_result = pd.DataFrame(
-    [[user_id, avg_score] for user_id, avg_score in enumerate(avg_scores)],
-    columns=["user_id", "avg_score"],
-)
-df_result.to_csv(Paths.OUTPUT, index=False)
-df_result
+    # Generate a DataFrame to output the result in a .csv file
+    df_result = pd.DataFrame(
+        [[user_id, avg_score] for user_id, avg_score in enumerate(avg_scores)],
+        columns=["user_id", "avg_score"],
+    )
+    df_result.to_csv(Paths.OUTPUT, index=False)
 
-# %% Encode items
-tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
-embedder = BertModel.from_pretrained("bert-base-uncased")
 
+def main():
+    model = NeuMF(
+        HParams.EMBED_SIZE,
+        ConstParams.N_TRAIN_USERS,
+        ConstParams.N_ITEMS,
+        HParams.NUMS_HIDDENS,
+    )
+    model.compile(
+        optimizer=keras.optimizers.Lion(
+            HParams.LEARNING_RATE, weight_decay=HParams.WEIGHT_DECAY
+        ),
+        loss=PairwiseRankingLoss(margin=0.5),
+    )
+    dataset_generator = DatasetGenerator(Paths.USER_DATA, Paths.ITEM_DATA)
+
+    model = explore_and_train(
+        model, dataset_generator, Paths.CHECKPOINT_DIR / "NeuMF", transfer=False
+    )
+
+    # test(model, dataset_generator, Paths.CHECKPOINT_DIR / "NeuMF", update_freq=500)
+
+
+# # %% Testing
+# # Initialize the testing environment
+# test_env = TestingEnvironment()
+# scores = []
+
+# # The item_ids here is for the random recommender
+# item_ids = list(range(ConstParams.N_ITEMS))
+
+# # Repeat the testing process for 5 times
+# for epoch in range(ConstParams.TEST_EPISODES):
+#     # [TODO] Load your model weights here (in the beginning of each testing episode)
+#     # [TODO] Code for loading your model weights...
+
+#     # Start the testing process
+#     with tqdm(desc="Testing") as pbar:
+#         # Run as long as there exist some active users
+#         while test_env.has_next_state():
+#             # Get the current user id
+#             cur_user = test_env.get_state()
+
+#             # [TODO] Employ your recommendation policy to generate a slate of 5 distinct items
+#             # [TODO] Code for generating the recommended slate...
+#             # Here we provide a simple random implementation
+#             slate = model.get_topn(cur_user, 5)
+
+#             # Get the response of the slate from the environment
+#             clicked_id, in_environment = test_env.get_response(slate)
+
+#             # [TODO] Update your model here (optional)
+#             # [TODO] You can update your model at each step, or perform a batched update after some interval
+#             # [TODO] Code for updating your model...
+
+#             # Update the progress indicator
+#             pbar.update(1)
+
+#     # Record the score of this testing episode
+#     scores.append(test_env.get_score())
+
+#     # Reset the testing environment
+#     test_env.reset()
+
+#     # [TODO] Delete or reset your model weights here (in the end of each testing episode)
+#     # [TODO] Code for deleting your model weights...
+
+# # Calculate the average scores
+# avg_scores = [np.average(score) for score in zip(*scores)]
+
+# # Generate a DataFrame to output the result in a .csv file
+# df_result = pd.DataFrame(
+#     [[user_id, avg_score] for user_id, avg_score in enumerate(avg_scores)],
+#     columns=["user_id", "avg_score"],
+# )
+# df_result.to_csv(Paths.OUTPUT, index=False)
+# df_result
 
 # %%
-def embed_pipeline(input_text: str) -> np.ndarray:
-    token_seq = tokenizer(input_text, return_tensors="pt")
-    embedding_seq = embedder(**token_seq)[0]
-    return embedding_seq.detach().numpy()
-
-
-input_text = df_item["headline"][:10]
-embeddings = list(map(embed_pipeline, tqdm(input_text)))
-
-# %% AutoRec
+if __name__ == "__main__":
+    main()
