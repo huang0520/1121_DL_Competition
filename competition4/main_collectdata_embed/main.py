@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 import tensorflow as tf
 from evaluation.environment import TrainingEnvironment, TestingEnvironment
 
+
 # %%
 os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 gpus = tf.config.experimental.list_physical_devices("GPU")
@@ -42,15 +43,14 @@ TRAIN_EPISODES = 50
 COLLABRATIVE_SLATE_SIZE = 5
 CONTENT_SLATE_SIZE = 0
 
-
 # %%
 # Dataset paths
 USER_DATA = os.path.join("../dataset", "user_data.json")
 ITEM_DATA = os.path.join("../dataset", "item_data.json")
+EMBEDDINGS_DATA = os.path.join("./data", "embeddings.json")
 
 # Output file path
 OUTPUT_PATH = os.path.join("output", "output_main.csv")
-
 
 # %%
 df_user = pd.read_json(USER_DATA, lines=True)
@@ -61,11 +61,81 @@ df_item = pd.read_json(ITEM_DATA, lines=True)
 df_item.head()
 # df_item["headline"].iloc[df_user.at[0, "history"][0]]
 
+# %%
+# * create embeddings.json
+
+import json
+
+from transformers import CLIPProcessor, CLIPTextModel, AutoTokenizer
+
+from sentence_transformers import SentenceTransformer, util
+
+# model = CLIPTextModel.from_pretrained("openai/clip-vit-base-patch32")
+
+# tokenizer = AutoTokenizer.from_pretrained("openai/clip-vit-base-patch32")
+
+if os.path.exists(EMBEDDINGS_DATA) == False:
+    output_iter = 0
+    headlines = df_item["headline"].values.tolist()
+    descrips = df_item["short_description"].values.tolist()
+
+    embedding_file = open('embeddings.json', mode="a+")
+    model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+    for headline, short_description in zip(headlines, descrips):
+        output_iter += 1
+        sentences = headline + " " + short_description
+
+        # Compute embedding for both lists
+        embedding = model.encode(sentences, convert_to_tensor=True)
+
+        # util.pytorch_cos_sim(embedding_1, embedding_2)
+
+        print(embedding.shape)
+        print(output_iter)
+        json.dump(embedding.tolist(), embedding_file)
+        embedding_file.write(os.linesep)
+    embedding_file.close()
+
+
+# %%
+df_embs = pd.read_json(EMBEDDINGS_DATA, lines=True)
+df_embs.head()
+
+# %%
+df_embs = tf.cast(df_embs[:].values, dtype=tf.float32)
+df_embs
+
+# %%
+import numpy.linalg as LA
+
+
+def top_k_nearest(sente_id, k):
+    vec = df_embs[sente_id]
+
+    # calaulate cosine similarity  of `vec` and all other vocabularies
+    dot = np.dot(df_embs.numpy(), vec)
+    embedding_norm = LA.norm(df_embs.numpy(), axis=-1)
+    vec_norm = LA.norm(vec)
+    norm_product = embedding_norm * vec_norm
+    cos_sim = dot / norm_product
+
+    # print out top k nearest words
+    indices = np.argsort(cos_sim)[::-1][:k]
+    print(
+        '---top {} nearest words of {}. {}---'.format(
+            k, sente_id, df_item.at[sente_id, "headline"]
+        )
+    )
+    for idx in indices:
+        print(f"{idx}. {df_item.at[idx, 'headline']}")
+    print('\n')
+
+# %%
+top_k_nearest(0, 6)
 
 # %%
 # Process Data
 train_data = []
-# res = tf.fill(dims = (2, 3), value = 1)
 
 histories = []
 uids = []
@@ -76,94 +146,13 @@ for uid in df_user.user_id:
         uids.append(uid)
         histories.append(his)
         ratings.append(1)
-# uids = tf.convert_to_tensor(uids, dtype=tf.float32)
-# histories = tf.convert_to_tensor(histories, dtype=tf.float32)
-# ratings = tf.convert_to_tensor(ratings, dtype=tf.float32)
+uids = tf.convert_to_tensor(uids, dtype=tf.float32)
+histories = tf.convert_to_tensor(histories, dtype=tf.float32)
+ratings = tf.convert_to_tensor(ratings, dtype=tf.float32)
 # print(type(uids))
 # print(df_user.at[uid, "history"])
 # df_user.at[uid, "history"].append(55)
 # print(df_user.at[uid, "history"])
-
-# %%
-df_item["short_description"].values.tolist()
-
-# %%
-#! Content-based Model:
-#! embedding ===============================================================================
-from transformers import CLIPProcessor, CLIPTextModel, AutoTokenizer
-
-model = CLIPTextModel.from_pretrained("openai/clip-vit-base-patch32")
-tokenizer = AutoTokenizer.from_pretrained("openai/clip-vit-base-patch32")
-
-# inputs = tokenizer(df_item["short_description"].values.tolist(), padding=True, return_tensors="pt")
-inputs = tokenizer(["a photo of a cat", "a photo of a dog"], padding=True, return_tensors="pt")
-
-outputs = model(**inputs)
-embedding = outputs.last_hidden_state.detach().numpy()
-print(inputs)
-# print(embedding)
-from sklearn.metrics.pairwise import linear_kernel
-
-# Compute the cosine similarity matrix
-cosine_sim = linear_kernel(embedding[0], embedding[1])
-print(cosine_sim.shape)
-import numpy.linalg as LA
-
-
-# %%
-# handy method for calculating the similarity between 2 word
-def cos_sim():
-    # id1 = word_to_id[word1]
-    # id2 = word_to_id[word2]
-
-    # vec1 = embedding_matrix[id1].numpy()
-    # vec2 = embedding_matrix[id2].numpy()
-
-    return np.dot(embedding[0], embedding[1]) / (LA.norm(embedding[0]) * LA.norm(embedding[1]))
-
-# cos_sim()
-#! embedding ===============================================================================
-
-
-# # Compute the cosine similarity matrix
-# cosine_sim = linear_kernel(tfidf_matrix, tfidf_matrix)
-
-# # %%
-# # Construct a reverse map of indices and movie titles
-# indices = pd.Series(df_item_sample.index, index=df_item_sample['headline']).drop_duplicates()
-
-
-# %%
-# Function that takes in movie title as input and outputs most similar movies
-# def get_recommendations(idx, cosine_sim=cosine_sim):
-#     headline = df_item.at[idx, "headline"]
-#     print(f"similar movie for id: {idx} - {headline}")
-#     # Get the index of the movie that matches the title
-#     # idx = indices[title]
-
-#     # Get the pairwsie similarity scores of all movies with that movie
-#     sim_scores = list(enumerate(cosine_sim[idx]))
-
-#     # Sort the movies based on the similarity scores
-#     sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)
-
-#     # Get the scores of the 10 most similar movies
-#     sim_scores = sim_scores[1 : CONTENT_SLATE_SIZE + 1]
-
-#     # Get the movie indices
-#     movie_indices = [i[0] for i in sim_scores]
-
-#     # Return the top 10 most similar movies
-#     # return df_item['headline'].iloc[movie_indices]
-
-#     return df_item['item_id'].iloc[movie_indices].tolist()
-
-
-# %%
-# content_recs = get_recommendations(165734)
-# # print(type(content_recs))
-# print(content_recs)
-
 
 # %%
 # Collabrative Model: funk-svd
@@ -302,7 +291,6 @@ class FunkSVDRecommender(tf.keras.Model):
         # update weights
         self.optimizer_update.apply_gradients(zip(gradients, self.trainable_variables))
 
-
 # %%
 # selected_slate = [[]] * N_TEST_USERS
 # print(len(uids))
@@ -320,7 +308,6 @@ class FunkSVDRecommender(tf.keras.Model):
 # selected_slate
 
 # %%
-
 model = FunkSVDRecommender(
     m_users=N_TEST_USERS,
     n_items=N_ITEMS,
@@ -500,4 +487,3 @@ df_result.to_csv(OUTPUT_PATH, index=False)
 df_result
 
 
-# %%
