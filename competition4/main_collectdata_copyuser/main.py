@@ -38,7 +38,7 @@ SLATE_SIZE = 5
 LEARNING_RATE = 2e-5
 EMBEDDING_SIZE = 512
 N_EPOCHS = 2500
-TRAIN_EPISODES = 100
+TRAIN_EPISODES = 200
 COLLABRATIVE_SLATE_SIZE = 5
 CONTENT_SLATE_SIZE = 0
 
@@ -71,7 +71,9 @@ for uid in df_user.user_id:
         uids.append(uid)
         histories.append(his)
         ratings.append(1)
-
+uids = tf.convert_to_tensor(uids, dtype=tf.float32)
+histories = tf.convert_to_tensor(histories, dtype=tf.float32)
+ratings = tf.convert_to_tensor(ratings, dtype=tf.float32)
 print(len(uids))
 print(uids)
 
@@ -131,8 +133,11 @@ class FunkSVDRecommender(tf.keras.Model):
         each record in data is in the format [UserID, MovieID, Rating, Timestamp]
         """
         print("train")
+        user_ids = tf.cast(uids, dtype=tf.int32)
+        item_ids = tf.cast(histories, dtype=tf.int32)
+        y_true = tf.cast(ratings, dtype=tf.float32)
 
-        print(f"uid:{uids} items{histories} y: {ratings}")
+        print(f"uid:{user_ids} items{item_ids} y: {y_true}")
 
         # compute loss
         with tf.GradientTape() as tape:
@@ -186,15 +191,22 @@ class FunkSVDRecommender(tf.keras.Model):
     def eval_update_onestep(
         self, uids: tf.Tensor, histories: tf.Tensor, ratings: tf.Tensor
     ) -> None:
+        # data = data[None, :]  # add a dim on axis 0
+        # user_ids = tf.cast(data[:, 0], dtype=tf.int32)
+        # item_ids = tf.cast(data[:, 1], dtype=tf.int32)
+        # y_true = tf.cast(data[:, 2], dtype=tf.float32)
+        user_ids = tf.cast(uids, dtype=tf.int32)
+        item_ids = tf.cast(histories, dtype=tf.int32)
+        y_true = tf.cast(ratings, dtype=tf.float32)
 
         # compute loss
-        y_pred = self(uids, histories)
-        loss = self.compute_loss(ratings, y_pred)
+        y_pred = self(user_ids, item_ids)
+        loss = self.compute_loss(y_true, y_pred)
 
         # compute loss
         with tf.GradientTape() as tape:
-            y_pred = self(uids, histories)
-            loss = self.compute_loss(ratings, y_pred)
+            y_pred = self(user_ids, item_ids)
+            loss = self.compute_loss(y_true, y_pred)
 
         # compute gradients
         gradients = tape.gradient(loss, self.trainable_variables)
@@ -222,7 +234,7 @@ for epoch in range(1, N_EPOCHS + 1):
 
     # print losses
     print(f"Epoch {epoch} train_loss: {avg_train_loss:.4f}\n")
-model.save("model_funk_svd")
+# model.save("model_funk_svd")
 
 # %%
 # Initialize the training environment
@@ -279,8 +291,8 @@ for _ in range(TRAIN_EPISODES):
             )
             print(ratings_)
 
-model.save("model_funk_svd")
-
+# model.save("model_funk_svd")
+# %%
 # Get the normalized session length score of all users
 train_score = train_env.get_score()
 df_train_score = pd.DataFrame(

@@ -1,4 +1,5 @@
 # %%
+# collec
 import os
 import random
 
@@ -71,7 +72,7 @@ SLATE_SIZE = 5
 LEARNING_RATE = 2e-5
 EMBEDDING_SIZE = 512
 N_EPOCHS = 2500
-TRAIN_EPISODES = 50
+TRAIN_EPISODES = 250
 COLLABRATIVE_SLATE_SIZE = 5
 CONTENT_SLATE_SIZE = 0
 
@@ -108,11 +109,11 @@ for uid in df_user.user_id:
         uids.append(uid)
         histories.append(his)
         ratings.append(1)
-# uids = tf.convert_to_tensor(uids, dtype=tf.float32)
-# histories = tf.convert_to_tensor(histories, dtype=tf.float32)
-# ratings = tf.convert_to_tensor(ratings, dtype=tf.float32)
-# print(type(uids))
-# print(df_user.at[uid, "history"])
+uids = tf.convert_to_tensor(uids, dtype=tf.float32)
+histories = tf.convert_to_tensor(histories, dtype=tf.float32)
+ratings = tf.convert_to_tensor(ratings, dtype=tf.float32)
+print(type(uids))
+print(df_user.at[uid, "history"])
 # df_user.at[uid, "history"].append(55)
 # print(df_user.at[uid, "history"])
 

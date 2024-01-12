@@ -10,7 +10,7 @@ import tensorflow as tf
 from evaluation.environment import TrainingEnvironment, TestingEnvironment
 
 # %%
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 gpus = tf.config.experimental.list_physical_devices("GPU")
 if gpus:
     try:
@@ -95,8 +95,8 @@ from transformers import CLIPProcessor, CLIPTextModel, AutoTokenizer
 model = CLIPTextModel.from_pretrained("openai/clip-vit-base-patch32")
 tokenizer = AutoTokenizer.from_pretrained("openai/clip-vit-base-patch32")
 
-inputs = tokenizer(df_item["short_description"].values.tolist(), padding=True, return_tensors="pt")
-# inputs = tokenizer(["a photo of a cat", "a photo of a dog"], padding=True, return_tensors="pt")
+# inputs = tokenizer(df_item["short_description"].values.tolist(), padding=True, return_tensors="pt")
+inputs = tokenizer(["a photo of a cat", "a photo of a dog"], padding=True, return_tensors="pt")
 
 outputs = model(**inputs)
 embedding = outputs.last_hidden_state.detach().numpy()
