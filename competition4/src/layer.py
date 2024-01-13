@@ -32,7 +32,8 @@ class FMLayer(keras.layers.Layer):
         )
 
     def call(self, inputs):
-        linear = self.w0 + tf.matmul(inputs, self.w)
+        linear = self.w0 + tf.sparse.sparse_dense_matmul(inputs, self.w)
+
         square_sum = tf.pow(tf.matmul(inputs, self.v), 2)
         sum_square = tf.matmul(tf.pow(inputs, 2), tf.pow(self.v, 2))
         second_order = 0.5 * tf.reduce_sum(

@@ -14,9 +14,9 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 from evaluation.environment import TestingEnvironment, TrainingEnvironment
-from src.dataset import DatasetGenerator, History
+from src.dataset import DatasetGenerator, History, LabeldDatasetGenerator
 from src.loss import PairwiseRankingLoss
-from src.recommender import NeuMF
+from src.recommender import FunkSVD, NeuMF
 from tensorflow import keras
 from tqdm.auto import tqdm, trange
 
@@ -77,7 +77,22 @@ def train(model, dataset):
 
     pbar = trange(HParams.NUM_EPOCHS, desc="Training", ncols=0)
     for _ in pbar:
-        losses = [model.train_step(data) for data in dataset]
+        losses = []
+
+        for user_ids, pos_item_ids, labels in dataset:
+            # Train positive samples
+            loss = model.train_step((user_ids, pos_item_ids, labels))
+            # Train negative samples
+            neg_item_ids = tf.random.uniform(
+                [8], 0, ConstParams.N_ITEMS, dtype=tf.int32
+            )
+            for neg_item_id in neg_item_ids:
+                loss += model.train_step((
+                    user_ids,
+                    tf.repeat(neg_item_id, len(user_ids)),
+                    tf.zeros_like(user_ids),
+                ))
+            losses.append(loss / 9)
         loss_record.append(tf.reduce_mean(losses).numpy())
         pbar.set_postfix({"loss": loss_record[-1]})
     pbar.set_postfix({"loss": np.mean(loss_record)}, refresh=True)
@@ -86,26 +101,23 @@ def train(model, dataset):
 
 
 def update(model, history, user_id, slate, clicked_id):
-    neg_item_ids = slate[slate != clicked_id]
+    if clicked_id == -1:
+        # neg_item_ids = slate.tolist()
+        # items = [random.choice(tuple(history.get(user_id)))] + neg_item_ids
+        items = slate.tolist()
+        labels = [0] * 5
 
-    if clicked_id != -1:
+    elif clicked_id != -1:
         history.add(user_id, clicked_id)
-        pos_item_ids = tf.convert_to_tensor([clicked_id] * len(neg_item_ids))
+        # neg_item_ids = slate[slate != clicked_id].tolist()
+        # items = [clicked_id] + neg_item_ids
+        items = [clicked_id]
+        labels = [1]
 
-    elif clicked_id == -1:
-        pos_item_tuple = tuple(history.get(user_id))
-        if len(pos_item_tuple) < len(neg_item_ids):
-            pos_item_ids = pos_item_tuple + tuple(
-                random.sample(pos_item_tuple, len(neg_item_ids) - len(pos_item_tuple))
-            )
-
-        elif len(pos_item_tuple) >= len(neg_item_ids):
-            pos_item_ids = random.sample(pos_item_tuple, len(neg_item_ids))
-
-    user_ids = tf.convert_to_tensor([user_id] * len(neg_item_ids))
-    pos_item_ids = tf.convert_to_tensor(pos_item_ids)
-    neg_item_ids = tf.convert_to_tensor(neg_item_ids)
-    loss = model.train_step((user_ids, pos_item_ids, neg_item_ids))
+    user_ids = tf.convert_to_tensor([user_id] * len(items))
+    items = tf.convert_to_tensor(items)
+    labels = tf.convert_to_tensor(labels)
+    loss = model.train_step((user_ids, items, labels))
 
     return model, loss.numpy()
 
@@ -123,10 +135,11 @@ def explore_with_update(env, model, history, slate_size=5):
 
         model, loss = update(model, history, user_id, slate, clicked_id)
         hit_count += 1 if clicked_id != -1 else 0
-        losses.append(loss)
 
         pbar.update(1)
-        pbar.set_postfix({"#click": hit_count, "loss": loss})
+        if loss is not None:
+            losses.append(loss)
+            pbar.set_postfix({"#click": hit_count, "loss": loss})
     pbar.set_postfix({"#click": hit_count, "loss": np.mean(losses)}, refresh=True)
 
     return model, hit_count, np.mean(losses)
@@ -142,18 +155,18 @@ def simulate_train(model, checkpoint_dir, transfer=False):
 
     env = TrainingEnvironment()
     history = History(Paths.USER_DATA)
+    LabeldDatasetGenerator(Paths.USER_DATA, Paths.ITEM_DATA)
 
     # Pre-train
-    if not transfer:
-        print("=" * 5 + " Pre-train " + "=" * 5)
-        dataset = DatasetGenerator(Paths.USER_DATA, Paths.ITEM_DATA).generate(
-            HParams.BATCH_SIZE
-        )
-        model, _ = train(model, dataset)
-        del dataset
+    # if not transfer:
+    #     print("=" * 5 + " Pre-train " + "=" * 5)
+    #     model, _ = train(model, dataset_generator.generate(HParams.BATCH_SIZE))
 
     for i in range(HParams.NUM_EPOSIDES):
         print("=" * 5 + f" Eposide {i + 1}/{HParams.NUM_EPOSIDES} " + "=" * 5)
+        # Train
+        # dataset = dataset_generator.generate(HParams.BATCH_SIZE)
+        # model, _ = train(model, dataset)
 
         # Explore and update
         env.reset()
@@ -166,7 +179,7 @@ def simulate_train(model, checkpoint_dir, transfer=False):
     return model
 
 
-def test(model, dataset_generator, checkpoint_dir):
+def test(model, checkpoint_dir):
     test_env = TestingEnvironment()
     scores = []
 
@@ -177,8 +190,10 @@ def test(model, dataset_generator, checkpoint_dir):
     for epoch in range(ConstParams.TEST_EPISODES):
         # [TODO] Load your model weights here (in the beginning of each testing episode)
         # [TODO] Code for loading your model weights...
+        print(f"Model restored from {tf.train.latest_checkpoint(checkpoint_dir)}.")
         checkpoint = tf.train.Checkpoint(model=model)
         checkpoint.restore(tf.train.latest_checkpoint(checkpoint_dir))
+        history = History(Paths.USER_DATA)
 
         # Start the testing process
         with tqdm(desc="Testing") as pbar:
@@ -198,7 +213,7 @@ def test(model, dataset_generator, checkpoint_dir):
                 # [TODO] Update your model here (optional)
                 # [TODO] You can update your model at each step, or perform a batched update after some interval
                 # [TODO] Code for updating your model...
-                model = update(model, dataset_generator, cur_user, slate, clicked_id)
+                model, _ = update(model, history, cur_user, slate, clicked_id)
 
                 # Update the progress indicator
                 pbar.update(1)
@@ -212,6 +227,7 @@ def test(model, dataset_generator, checkpoint_dir):
         # [TODO] Delete or reset your model weights here (in the end of each testing episode)
         # [TODO] Code for deleting your model weights...
         checkpoint.restore(tf.train.latest_checkpoint(checkpoint_dir))
+        history.reset()
 
     # Calculate the average scores
     avg_scores = [np.average(score) for score in zip(*scores)]
@@ -227,22 +243,22 @@ def test(model, dataset_generator, checkpoint_dir):
 
 
 def main():
-    model = NeuMF(
+    model = FunkSVD(
         HParams.EMBED_SIZE,
         ConstParams.N_TRAIN_USERS,
         ConstParams.N_ITEMS,
-        HParams.NUMS_HIDDENS,
+        l2_lambda=0.005,
     )
     model.compile(
         optimizer=keras.optimizers.Lion(
             HParams.LEARNING_RATE, weight_decay=HParams.WEIGHT_DECAY
         ),
-        loss=PairwiseRankingLoss(margin=1),
+        loss=keras.losses.BinaryCrossentropy(from_logits=True),
     )
 
-    model = simulate_train(model, Paths.CHECKPOINT_DIR / "NeuMF", transfer=False)
+    model = simulate_train(model, Paths.CHECKPOINT_DIR / "FunkSVD", transfer=False)
 
-    # test(model, dataset_generator, Paths.CHECKPOINT_DIR / "NeuMF")
+    # test(model, Paths.CHECKPOINT_DIR / "FunkSVD")
 
 
 # # %% Testing
