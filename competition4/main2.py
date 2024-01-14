@@ -164,8 +164,9 @@ def explore_with_update(env, model, history, slate_size=ConstParams.COLLABORATIV
         iter_more_slake = 1
         while len(slate) != ConstParams.SLATE_SIZE:
             print("more")
-            more_slate = top_k_nearest(last(history.get(user_id)), ConstParams.CONTENT_BASED_SLATE_SIZE)
-            slate = np.concatenate((slate, more_slate[-1]))
+            more_slate = top_k_nearest(last(history.get(user_id)), ConstParams.CONTENT_BASED_SLATE_SIZE + iter_more_slake)
+            slate = np.append(slate, more_slate[-1])
+            slate = np.unique(slate)
             iter_more_slake += 1
         assert len(slate.tolist()) == ConstParams.SLATE_SIZE, "wrong slate len"
         # print( len(slate.tolist()))
