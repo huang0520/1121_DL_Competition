@@ -91,7 +91,7 @@ def top_k_nearest(sente_id, k):
     norm_product = embedding_norm * vec_norm
     cos_sim = dot / norm_product
 
-    indices = np.argsort(cos_sim)[::-1][:k]
+    indices = np.argsort(cos_sim)[::-1][:k+1][1:]
 
     return indices
 
