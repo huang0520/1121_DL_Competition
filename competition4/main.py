@@ -45,6 +45,8 @@ class ConstParams:
     HORIZON: int = 2000
     TEST_EPISODES: int = 5
     SLATE_SIZE: int = 5
+    COLLABORATIVE_SLATE_SIZE: int = 3
+    CONTENT_BASED_SLATE_SIZE: int = 2
 
 
 @dataclass
@@ -69,6 +71,7 @@ class Paths:
 
 random.seed(HParams.RANDOM_STATE)
 
+assert ConstParams.SLATE_SIZE == ConstParams.COLLABORATIVE_SLATE_SIZE + ConstParams.CONTENT_BASED_SLATE_SIZE, "slate size doesn't match"
 
 # %%
 # Training pipeline

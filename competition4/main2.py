@@ -45,7 +45,10 @@ class ConstParams:
     HORIZON: int = 2000
     TEST_EPISODES: int = 5
     SLATE_SIZE: int = 5
+    COLLABORATIVE_SLATE_SIZE: int = 3
+    CONTENT_BASED_SLATE_SIZE: int = 2
 
+assert ConstParams.SLATE_SIZE == ConstParams.COLLABORATIVE_SLATE_SIZE + ConstParams.CONTENT_BASED_SLATE_SIZE, "slate size doesn't match"
 
 @dataclass
 class HParams:
@@ -65,10 +68,32 @@ class Paths:
     ITEM_DATA: Path = Path("./dataset/item_data.json")
     OUTPUT: Path = Path("./output/output.csv")
     CHECKPOINT_DIR: Path = Path("./checkpoint")
+    SENTENCE_EMBS_DATA: Path = Path("./dataset/embeddings.json")
 
 
 random.seed(HParams.RANDOM_STATE)
 
+# %%
+# load sentence embedding
+df_embs = pd.read_json(Paths.SENTENCE_EMBS_DATA, lines=True)
+df_embs.head()
+df_embs = tf.cast(df_embs[:].values, dtype=tf.float32)
+
+# %%
+import numpy.linalg as LA
+def top_k_nearest(sente_id, k):
+    vec = df_embs[sente_id]
+
+    # calaulate cosine similarity  of `vec` and all other vocabularies
+    dot = np.dot(df_embs.numpy(), vec)
+    embedding_norm = LA.norm(df_embs.numpy(), axis=-1)
+    vec_norm = LA.norm(vec)
+    norm_product = embedding_norm * vec_norm
+    cos_sim = dot / norm_product
+
+    indices = np.argsort(cos_sim)[::-1][:k]
+
+    return indices
 
 # %%
 # Training pipeline
@@ -123,14 +148,19 @@ def update(model, history, user_id, slate, clicked_id):
 
 
 # Explore pipeline
-def explore_with_update(env, model, history, slate_size=5):
+def explore_with_update(env, model, history, slate_size=ConstParams.COLLABORATIVE_SLATE_SIZE):
     hit_count = 0
     losses = []
 
     pbar = tqdm(desc="Explore & Update")
     while env.has_next_state():
         user_id = env.get_state()
-        slate = model.get_topk(user_id, slate_size)
+        collab_slate = model.get_topk(user_id, slate_size)
+        content_slate = top_k_nearest(next(iter(history.get(user_id))), ConstParams.CONTENT_BASED_SLATE_SIZE)
+        slate = np.concatenate((collab_slate, content_slate))
+        assert len(slate.tolist()) == ConstParams.SLATE_SIZE, "wrong slate len"
+        print( len(slate.tolist()))
+        print(slate)
         clicked_id, _ = env.get_response(slate)
 
         model, loss = update(model, history, user_id, slate, clicked_id)
@@ -171,7 +201,7 @@ def simulate_train(model, checkpoint_dir, transfer=False):
         # Explore and update
         env.reset()
         history.reset()
-        model, _, _ = explore_with_update(env, model, history, ConstParams.SLATE_SIZE)
+        model, _, _ = explore_with_update(env, model, history, ConstParams.COLLABORATIVE_SLATE_SIZE)
         print(f"Average Score: {np.mean(env.get_score()):.6f}")
 
         # Save checkpoint
@@ -319,3 +349,5 @@ def main():
 # %%
 if __name__ == "__main__":
     main()
+
+# %%
