@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 from evaluation.environment import TestingEnvironment, TrainingEnvironment
-from src.dataset import DatasetGenerator, History, LabeldDatasetGenerator
+from src.dataset import DataManager, History, LabelTokenDatasetGenerator
 from src.loss import PairwiseRankingLoss
 from src.recommender import FunkSVD, NeuMF
 from tensorflow import keras
@@ -45,6 +45,7 @@ class ConstParams:
     HORIZON: int = 2000
     TEST_EPISODES: int = 5
     SLATE_SIZE: int = 5
+    NUM_TOKENS: int = 49408
 
 
 @dataclass
@@ -54,9 +55,10 @@ class HParams:
     LEARNING_RATE: float = 0.00005
     WEIGHT_DECAY: float = 0.0004
     RANDOM_STATE: int = 42
-    NUM_EPOCHS: int = 10
+    NUM_EPOCHS: int = 5
     NUM_EPOSIDES: int = 100
     NUMS_HIDDENS: tuple[int] = (64, 32, 16, 8)
+    N_NEGTIVES: int = 14
 
 
 @dataclass
@@ -65,6 +67,8 @@ class Paths:
     ITEM_DATA: Path = Path("./dataset/item_data.json")
     OUTPUT: Path = Path("./output/output.csv")
     CHECKPOINT_DIR: Path = Path("./checkpoint")
+    TOKEN_PATH: Path = Path("./dataset/item_token.pkl")
+    USER_DATA_PLUS: Path = Path("./dataset/user_data_plus.pkl")
 
 
 random.seed(HParams.RANDOM_STATE)
@@ -72,106 +76,122 @@ random.seed(HParams.RANDOM_STATE)
 
 # %%
 # Training pipeline
-def train(model, dataset):
-    loss_record = []
+def train(model, dataset, data_manager, n_neg=14):
+    epoch_loss = []
 
     pbar = trange(HParams.NUM_EPOCHS, desc="Training", ncols=0)
     for _ in pbar:
-        losses = []
+        batch_loss = []
 
-        for user_ids, pos_item_ids, labels in dataset:
+        for user_ids, pos_item_ids, title_tokens, desc_tokens, labels in dataset:
+            losses = []
+            batch_size = len(user_ids)
+
             # Train positive samples
-            loss = model.train_step((user_ids, pos_item_ids, labels))
+            loss = model.train_step((
+                user_ids,
+                pos_item_ids,
+                title_tokens,
+                desc_tokens,
+                labels,
+            ))
+            losses.append(loss)
+
             # Train negative samples
             neg_item_ids = tf.random.uniform(
-                [8], 0, ConstParams.N_ITEMS, dtype=tf.int32
+                shape=(n_neg, batch_size),
+                minval=0,
+                maxval=ConstParams.N_ITEMS,
+                dtype=tf.int32,
             )
-            for neg_item_id in neg_item_ids:
-                loss += model.train_step((
-                    user_ids,
-                    tf.repeat(neg_item_id, len(user_ids)),
-                    tf.zeros_like(user_ids),
+            for _neg_item_id in neg_item_ids:
+                neg_title_tokens, neg_desc_tokens = (
+                    data_manager.item_to_tokens.loc[_neg_item_id].to_numpy().T
+                )
+                loss = model.train_step((
+                    tf.constant(user_ids),
+                    tf.constant(_neg_item_id),
+                    tf.ragged.constant(neg_title_tokens),
+                    tf.ragged.constant(neg_desc_tokens),
+                    tf.zeros(batch_size),
                 ))
-            losses.append(loss / 9)
-        loss_record.append(tf.reduce_mean(losses).numpy())
-        pbar.set_postfix({"loss": loss_record[-1]})
-    pbar.set_postfix({"loss": np.mean(loss_record)}, refresh=True)
+                losses.append(loss)
 
-    return model, loss_record
+            batch_loss.append(tf.reduce_mean(losses).numpy())
+        epoch_loss.append(np.mean(batch_loss))
+        pbar.set_postfix({"loss": epoch_loss[-1]})
+    pbar.set_postfix({"loss": np.mean(epoch_loss)}, refresh=True)
+
+    return model, np.mean(epoch_loss)
 
 
-def update(model, history, user_id, slate, clicked_id):
-    if clicked_id == -1:
-        # neg_item_ids = slate.tolist()
-        # items = [random.choice(tuple(history.get(user_id)))] + neg_item_ids
-        items = slate.tolist()
-        labels = [0] * 5
+def update(model, user_id, clicked_id):
+    # Positive samples
+    model.train_step((
+        tf.convert_to_tensor([[user_id]]),
+        tf.convert_to_tensor([[clicked_id]]),
+        tf.ones(1),
+    ))
 
-    elif clicked_id != -1:
-        history.add(user_id, clicked_id)
-        # neg_item_ids = slate[slate != clicked_id].tolist()
-        # items = [clicked_id] + neg_item_ids
-        items = [clicked_id]
-        labels = [1]
+    # Negative samples
+    neg_item_ids = tf.random.uniform(
+        shape=(HParams.N_NEGTIVES,),
+        minval=0,
+        maxval=ConstParams.N_ITEMS,
+        dtype=tf.int32,
+    )
+    model.train_step((
+        tf.repeat(user_id, HParams.N_NEGTIVES),
+        neg_item_ids,
+        tf.zeros(HParams.N_NEGTIVES),
+    ))
 
-    user_ids = tf.convert_to_tensor([user_id] * len(items))
-    items = tf.convert_to_tensor(items)
-    labels = tf.convert_to_tensor(labels)
-    loss = model.train_step((user_ids, items, labels))
-
-    return model, loss.numpy()
+    return model
 
 
 # Explore pipeline
-def explore_with_update(env, model, history, slate_size=5):
+def explore(env, model, data_manager, slate_size=5):
     hit_count = 0
-    losses = []
-
-    pbar = tqdm(desc="Explore & Update")
+    pbar = tqdm(desc="Explore")
     while env.has_next_state():
         user_id = env.get_state()
         slate = model.get_topk(user_id, slate_size)
         clicked_id, _ = env.get_response(slate)
 
-        model, loss = update(model, history, user_id, slate, clicked_id)
-        hit_count += 1 if clicked_id != -1 else 0
+        if clicked_id != -1:
+            hit_count += 1
+            data_manager.add(user_id, clicked_id)
+            model = update(model, user_id, clicked_id)
 
         pbar.update(1)
-        if loss is not None:
-            losses.append(loss)
-            pbar.set_postfix({"#click": hit_count, "loss": loss})
-    pbar.set_postfix({"#click": hit_count, "loss": np.mean(losses)}, refresh=True)
+        pbar.set_postfix({"#click": hit_count})
 
-    return model, hit_count, np.mean(losses)
+    return model, hit_count
 
 
 # Simulate pipeline
-def simulate_train(model, checkpoint_dir, transfer=False):
+def simulate_train(model, data_manager, checkpoint_dir, transfer=False):
     checkpoint = tf.train.Checkpoint(model=model)
     ckpt_manager = tf.train.CheckpointManager(checkpoint, checkpoint_dir, max_to_keep=1)
     if transfer:
         checkpoint.restore(ckpt_manager.latest_checkpoint)
         print(f"Model restored from {ckpt_manager.latest_checkpoint}.")
 
-    env = TrainingEnvironment()
-    history = History(Paths.USER_DATA)
-    LabeldDatasetGenerator(Paths.USER_DATA, Paths.ITEM_DATA)
-
-    # Pre-train
-    # if not transfer:
-    #     print("=" * 5 + " Pre-train " + "=" * 5)
-    #     model, _ = train(model, dataset_generator.generate(HParams.BATCH_SIZE))
-
     for i in range(HParams.NUM_EPOSIDES):
         print("=" * 5 + f" Eposide {i + 1}/{HParams.NUM_EPOSIDES} " + "=" * 5)
+
+        # Initialize
+        env = TrainingEnvironment()
+        dataset_generator = LabelTokenDatasetGenerator(
+            data_manager.get_sequences(), data_manager.item_to_tokens
+        )
+
         # Train
-        # dataset = dataset_generator.generate(HParams.BATCH_SIZE)
-        # model, _ = train(model, dataset)
+        dataset = dataset_generator(HParams.BATCH_SIZE)
+        model, _ = train(model, dataset, data_manager, HParams.N_NEGTIVES)
 
         # Explore and update
-        env.reset()
-        history.reset()
-        model, _, _ = explore_with_update(env, model, history, ConstParams.SLATE_SIZE)
+        model, _ = explore(env, model, data_manager, ConstParams.SLATE_SIZE)
         print(f"Average Score: {np.mean(env.get_score()):.6f}")
 
         # Save checkpoint
@@ -243,79 +263,31 @@ def test(model, checkpoint_dir):
 
 
 def main():
+    data_manager = DataManager(Paths.USER_DATA, Paths.ITEM_DATA, Paths.TOKEN_PATH)
+    data_manager.load(Paths.USER_DATA_PLUS) if Paths.USER_DATA_PLUS.exists() else None
+
     model = FunkSVD(
         HParams.EMBED_SIZE,
         ConstParams.N_TRAIN_USERS,
         ConstParams.N_ITEMS,
+        ConstParams.NUM_TOKENS,
         l2_lambda=0.005,
     )
     model.compile(
-        optimizer=keras.optimizers.Lion(
-            HParams.LEARNING_RATE, weight_decay=HParams.WEIGHT_DECAY
+        optimizer=tf.keras.optimizers.AdamW(
+            learning_rate=0.0001, weight_decay=0.0004, use_ema=True
         ),
-        loss=keras.losses.BinaryCrossentropy(from_logits=True),
+        loss=tf.keras.losses.BinaryFocalCrossentropy(
+            apply_class_balancing=True, from_logits=True, label_smoothing=0.1
+        ),
     )
 
-    model = simulate_train(model, Paths.CHECKPOINT_DIR / "FunkSVD", transfer=False)
+    model = simulate_train(
+        model, data_manager, Paths.CHECKPOINT_DIR / "FunkSVD", transfer=False
+    )
 
     # test(model, Paths.CHECKPOINT_DIR / "FunkSVD")
 
 
-# # %% Testing
-# # Initialize the testing environment
-# test_env = TestingEnvironment()
-# scores = []
-
-# # The item_ids here is for the random recommender
-# item_ids = list(range(ConstParams.N_ITEMS))
-
-# # Repeat the testing process for 5 times
-# for epoch in range(ConstParams.TEST_EPISODES):
-#     # [TODO] Load your model weights here (in the beginning of each testing episode)
-#     # [TODO] Code for loading your model weights...
-
-#     # Start the testing process
-#     with tqdm(desc="Testing") as pbar:
-#         # Run as long as there exist some active users
-#         while test_env.has_next_state():
-#             # Get the current user id
-#             cur_user = test_env.get_state()
-
-#             # [TODO] Employ your recommendation policy to generate a slate of 5 distinct items
-#             # [TODO] Code for generating the recommended slate...
-#             # Here we provide a simple random implementation
-#             slate = model.get_topn(cur_user, 5)
-
-#             # Get the response of the slate from the environment
-#             clicked_id, in_environment = test_env.get_response(slate)
-
-#             # [TODO] Update your model here (optional)
-#             # [TODO] You can update your model at each step, or perform a batched update after some interval
-#             # [TODO] Code for updating your model...
-
-#             # Update the progress indicator
-#             pbar.update(1)
-
-#     # Record the score of this testing episode
-#     scores.append(test_env.get_score())
-
-#     # Reset the testing environment
-#     test_env.reset()
-
-#     # [TODO] Delete or reset your model weights here (in the end of each testing episode)
-#     # [TODO] Code for deleting your model weights...
-
-# # Calculate the average scores
-# avg_scores = [np.average(score) for score in zip(*scores)]
-
-# # Generate a DataFrame to output the result in a .csv file
-# df_result = pd.DataFrame(
-#     [[user_id, avg_score] for user_id, avg_score in enumerate(avg_scores)],
-#     columns=["user_id", "avg_score"],
-# )
-# df_result.to_csv(Paths.OUTPUT, index=False)
-# df_result
-
-# %%
 if __name__ == "__main__":
     main()

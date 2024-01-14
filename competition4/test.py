@@ -4,95 +4,80 @@ import os
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from src.layer import FMLayer
+from evaluation.environment import TestingEnvironment, TrainingEnvironment
+from icecream import ic
+from src.dataset import DataManager, History, LabelTokenDatasetGenerator
+from src.layer import SparseFMLayer
+from src.recommender import FMEmbeding, SparseFM, SparseHotEncoder
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+
 # %%
-df_user = pd.read_json("./dataset/user_data.json", lines=True)
 item_to_tokens = pd.read_pickle("./dataset/item_token.pkl")
-seq = df_user.explode("history", ignore_index=True)
-seq["token"] = seq["history"].map(item_to_tokens)
-
-seq.head()
 
 # %%
-user_id = tf.keras.Input(shape=(1,), dtype=tf.int32)
-item_id = tf.keras.Input(shape=(1,), dtype=tf.int32)
-tokens = tf.keras.Input(shape=(None,), dtype=tf.int32, ragged=True)
-
-user_encoder = tf.keras.layers.CategoryEncoding(
-    len(df_user), output_mode="one_hot", sparse=True
-)
-item_encoder = tf.keras.layers.CategoryEncoding(
-    len(item_to_tokens), output_mode="one_hot", sparse=True
-)
-token_encoder = tf.keras.layers.CategoryEncoding(
-    30522, output_mode="multi_hot", sparse=True
-)
-user_embedder = tf.keras.layers.Embedding(
-    len(df_user),
-    64,
-    embeddings_initializer="random_normal",
-    embeddings_regularizer=tf.keras.regularizers.L2(0.1),
-    sparse=True,
-)
-item_embedder = tf.keras.layers.Embedding(
-    len(item_to_tokens),
-    64,
-    embeddings_initializer="random_normal",
-    embeddings_regularizer=tf.keras.regularizers.L2(0.1),
-    sparse=True,
-)
-token_embedder = tf.keras.layers.Embedding(
-    30522,
-    64,
-    embeddings_initializer="random_normal",
-    embeddings_regularizer=tf.keras.regularizers.L2(0.1),
-    sparse=True,
-)
-
-user_field = user_encoder(user_id)
-item_field = item_encoder(item_id)
-token_field = token_encoder(tokens)
-
-# user_embedding = user_embedder(user_field)
-# item_embedding = item_embedder(item_field)
-# token_embedding = token_embedder(token_field)
-
-# output = tf.keras.layers.Concatenate()([
-#     user_embedding,
-#     item_embedding,
-#     token_embedding,
-# ])
-
-output = tf.keras.layers.Concatenate()([user_field, item_field, token_field])
-
-input_encoder = tf.keras.models.Model(inputs=(user_id, item_id, tokens), outputs=output)
+a, b = item_to_tokens.loc[[0, 222, 333]].to_numpy().T
+a
+# %%
+a = pd.read_pickle("./dataset/user_data_plus.pkl")
+a["history"].map(len).value_counts()
 
 # %%
-dataset = (
-    tf.data.Dataset.from_tensor_slices((
-        user_encoder(seq["user_id"].to_numpy(dtype=int)),
-        item_encoder(seq["history"].to_numpy(dtype=int)),
-        token_encoder(tf.ragged.constant(seq["token"])),
-    ))
-    .batch(8)
-    .prefetch(tf.data.AUTOTUNE)
+data_manager = DataManager(
+    "./dataset/user_data.json", "./dataset/item_data.json", "./dataset/item_token.pkl"
+)
+dataset_generator = LabelTokenDatasetGenerator(
+    data_manager.get_sequences(), data_manager.item_to_tokens
 )
 
+encoder = SparseHotEncoder(2000, 209527, 49408)
+model = SparseFM(8, 0.1, 0.1)
+model.compile(
+    optimizer=tf.keras.optimizers.Adam(),
+    loss=tf.keras.losses.BinaryCrossentropy(from_logits=True),
+)
+
+dataset = dataset_generator(8)
+for data in dataset:
+    user_ids, item_ids, title, desc, labels = data
+
+    features = encoder((user_ids, item_ids, title, desc))
+    loss = model.train_step((features, labels))
+    break
+
+fm_embedding = FMEmbeding(encoder, 2000, 209527, 49408, model)
+
+df_seq = dataset_generator.df_seq
+user_embedding_dict = fm_embedding.get_user_embedding(df_seq)
+item_embedding_dict = fm_embedding.get_item_embedding(df_seq)
+
+
+count = 5
+for k, v in user_embedding_dict.items():
+    ic(k, v)
+    count -= 1
+    if count == 0:
+        break
+
 # %%
-# fm = FMLayer(64, 0.1, 0.1)
-
-# for batch in dataset.take(1):
-#     inputs = input_encoder(batch)
-#     print(fm(inputs))
-
-# %%
-a = tf.constant([[1, 2]])
-b = tf.constant([[1, 2]])
-print(a.shape, b.shape)
-
-tf.matmul(a, b, transpose_b=True)
-
-# %%
-tf.reduce_sum(a * b, axis=1)
+# user_embedder = tf.keras.layers.Embedding(
+#     len(df_user),
+#     64,
+#     embeddings_initializer="random_normal",
+#     embeddings_regularizer=tf.keras.regularizers.L2(0.1),
+#     sparse=True,
+# )
+# item_embedder = tf.keras.layers.Embedding(
+#     len(item_to_tokens),
+#     64,
+#     embeddings_initializer="random_normal",
+#     embeddings_regularizer=tf.keras.regularizers.L2(0.1),
+#     sparse=True,
+# )
+# token_embedder = tf.keras.layers.Embedding(
+#     30522,
+#     64,
+#     embeddings_initializer="random_normal",
+#     embeddings_regularizer=tf.keras.regularizers.L2(0.1),
+#     sparse=True,
+# )

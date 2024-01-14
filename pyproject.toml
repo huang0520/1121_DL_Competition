@@ -51,7 +51,7 @@ select = [
     "C4",   # Comprehensive
     "UP",   # Upgrade newer syntax
 ]
-ignore = ["F401", "E402"]
+ignore = ["F401", "E402", "E203"]
 include = ["*.py", "*.pyi", "**/pyproject.toml", "*.ipynb"]
 
 line-length = 88

@@ -2,7 +2,7 @@ import tensorflow as tf
 from tensorflow import keras
 
 
-class FMLayer(keras.layers.Layer):
+class SparseFMLayer(keras.layers.Layer):
     def __init__(self, k, w_reg, v_reg, **kwargs):
         super().__init__(**kwargs)
         self.k = k
@@ -10,21 +10,21 @@ class FMLayer(keras.layers.Layer):
         self.v_reg = v_reg
 
     def build(self, input_shape):
-        self.w0 = self.add_weight(
-            name="w0",
+        self.bias = self.add_weight(
+            name="bias",
             shape=(1,),
             initializer="zeros",
             trainable=True,
         )
-        self.w = self.add_weight(
-            name="w",
+        self.weight = self.add_weight(
+            name="weight",
             shape=(input_shape[-1], 1),
             initializer="random_normal",
             regularizer=keras.regularizers.l2(self.w_reg),
             trainable=True,
         )
-        self.v = self.add_weight(
-            name="v",
+        self.embedding = self.add_weight(
+            name="embedding",
             shape=(input_shape[-1], self.k),
             initializer="random_normal",
             regularizer=keras.regularizers.l2(self.v_reg),
@@ -32,10 +32,12 @@ class FMLayer(keras.layers.Layer):
         )
 
     def call(self, inputs):
-        linear = self.w0 + tf.sparse.sparse_dense_matmul(inputs, self.w)
-
-        square_sum = tf.pow(tf.matmul(inputs, self.v), 2)
-        sum_square = tf.matmul(tf.pow(inputs, 2), tf.pow(self.v, 2))
+        linear = self.bias + tf.sparse.sparse_dense_matmul(inputs, self.weight)
+        square_sum = tf.pow(tf.sparse.sparse_dense_matmul(inputs, self.embedding), 2)
+        sum_square = tf.sparse.sparse_dense_matmul(
+            tf.sparse.map_values(tf.math.pow, inputs, 2),
+            tf.math.pow(self.embedding, 2),
+        )
         second_order = 0.5 * tf.reduce_sum(
             square_sum - sum_square, axis=1, keepdims=True
         )
