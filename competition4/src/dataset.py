@@ -1,5 +1,6 @@
+import pickle
 import random
-from time import time
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -66,7 +67,7 @@ class DatasetGenerator:
 
 
 class DataManager:
-    def __init__(self, user_path, item_path, token_path):
+    def __init__(self, user_path, item_path, token_path, embedding_path):
         df_user = pd.read_json(user_path, lines=True)
         df_item = pd.read_json(item_path, lines=True)
 
@@ -75,40 +76,46 @@ class DataManager:
 
         self.pairs = set(df_user.explode("history").itertuples(index=False, name=None))
         self.item_to_tokens = pd.read_pickle(token_path)
+        self.item_to_embedding = pd.read_pickle(embedding_path)
 
-        self.all_item_set = set(df_item["item_id"])
         self.pos_item_sets = df_user["history"].apply(set).to_list()
-        self.neg_item_sets = [
-            self.all_item_set - pos_item_set for pos_item_set in self.pos_item_sets
-        ]
+        self.similarity_items = {}
 
     def add(self, user_id, item_id):
         self.pairs.add((user_id, item_id))
         self.pos_item_sets[user_id].add(item_id)
-        self.neg_item_sets[user_id].discard(item_id)
 
     def remove(self, user_id, item_id):
         self.pairs.remove((user_id, item_id))
         self.pos_item_sets[user_id].discard(item_id)
-        self.neg_item_sets[user_id].add(item_id)
 
     def get_sequences(self):
         return list(self.pairs)
 
-    def save(self, save_path):
+    def save(self, user_plus_path, similarity_path):
         df_user = pd.DataFrame({
             "user_id": range(self.num_users),
             "history": self.pos_item_sets,
         })
-        df_user.to_pickle(save_path)
+        df_user.to_pickle(user_plus_path)
 
-    def load(self, load_path):
-        df_user = pd.read_pickle(load_path)
-        self.pairs = set(df_user.explode("history").itertuples(index=False, name=None))
-        self.pos_item_sets = df_user["history"].to_list()
-        self.neg_item_sets = [
-            self.all_item_set - pos_item_set for pos_item_set in self.pos_item_sets
-        ]
+        with Path.open(similarity_path, "wb") as f:
+            pickle.dump(self.similarity_items, f)
+
+    def load(self, user_plus_path, similarity_path):
+        if Path(user_plus_path).exists():
+            df_user = pd.read_pickle(user_plus_path)
+            self.pairs = set(
+                df_user.explode("history").itertuples(index=False, name=None)
+            )
+            self.pos_item_sets = df_user["history"].to_list()
+
+        if Path(similarity_path).exists():
+            with Path.open(similarity_path, "rb") as f:
+                self.similarity_items = pickle.load(f)
+
+    def add_top100_items(self, item_id, sort_item_ids):
+        self.similarity_items[item_id] = sort_item_ids[:100]
 
 
 class LabelTokenDatasetGenerator:

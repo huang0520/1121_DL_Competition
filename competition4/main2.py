@@ -68,7 +68,9 @@ class Paths:
     OUTPUT: Path = Path("./output/output.csv")
     CHECKPOINT_DIR: Path = Path("./checkpoint")
     TOKEN_PATH: Path = Path("./dataset/item_token.pkl")
+    EMBEDDING_PATH: Path = Path("./dataset/item_to_embedding.pkl")
     USER_DATA_PLUS: Path = Path("./dataset/user_data_plus.pkl")
+    SIMILARITY_PATH: Path = Path("./dataset/similarity_items.pkl")
 
 
 random.seed(HParams.RANDOM_STATE)
@@ -91,8 +93,8 @@ def train(model, dataset, data_manager, n_neg=14):
             loss = model.train_step((
                 user_ids,
                 pos_item_ids,
-                title_tokens,
-                desc_tokens,
+                # title_tokens,
+                # desc_tokens,
                 labels,
             ))
             losses.append(loss)
@@ -105,14 +107,14 @@ def train(model, dataset, data_manager, n_neg=14):
                 dtype=tf.int32,
             )
             for _neg_item_id in neg_item_ids:
-                neg_title_tokens, neg_desc_tokens = (
-                    data_manager.item_to_tokens.loc[_neg_item_id].to_numpy().T
-                )
+                # neg_title_tokens, neg_desc_tokens = (
+                #     data_manager.item_to_tokens.loc[_neg_item_id].to_numpy().T
+                # )
                 loss = model.train_step((
                     tf.constant(user_ids),
                     tf.constant(_neg_item_id),
-                    tf.ragged.constant(neg_title_tokens),
-                    tf.ragged.constant(neg_desc_tokens),
+                    # tf.ragged.constant(neg_title_tokens),
+                    # tf.ragged.constant(neg_desc_tokens),
                     tf.zeros(batch_size),
                 ))
                 losses.append(loss)
@@ -149,13 +151,42 @@ def update(model, user_id, clicked_id):
     return model
 
 
+def get_content_topk(data_manager, clicked_id, k=2, choose_self=True):
+    n = 0 if choose_self else 1
+    if clicked_id in data_manager.similarity_items:
+        return data_manager.similarity_items[clicked_id][n : n + k]
+
+    item_to_embedding = data_manager.item_to_embedding
+    scores = tf.losses.CosineSimilarity(reduction="none")(
+        tf.repeat(
+            tf.constant(item_to_embedding.iloc[clicked_id], shape=(1, 384)),
+            len(item_to_embedding),
+            axis=0,
+        ),
+        tf.constant(item_to_embedding),
+    )
+
+    sort_items = tf.argsort(scores).numpy().tolist()
+
+    data_manager.add_top100_items(clicked_id, sort_items)
+    return sort_items[n : n + k]
+
+
 # Explore pipeline
 def explore(env, model, data_manager, slate_size=5):
     hit_count = 0
     pbar = tqdm(desc="Explore")
     while env.has_next_state():
         user_id = env.get_state()
-        slate = model.get_topk(user_id, slate_size)
+        random_pos_item_id = random.choice(tuple(data_manager.pos_item_sets[user_id]))
+        coll_slate = model.get_topk(user_id, 3)
+        cont_slate = get_content_topk(data_manager, random_pos_item_id, 2)
+        slate = np.unique(coll_slate + cont_slate).tolist()
+        while len(slate) < slate_size:
+            slate = np.unique(
+                slate
+                + random.sample(model.get_topk(user_id, 10), slate_size - len(slate))
+            ).tolist()
         clicked_id, _ = env.get_response(slate)
 
         if clicked_id != -1:
@@ -194,8 +225,10 @@ def simulate_train(model, data_manager, checkpoint_dir, transfer=False):
         model, _ = explore(env, model, data_manager, ConstParams.SLATE_SIZE)
         print(f"Average Score: {np.mean(env.get_score()):.6f}")
 
-        # Save checkpoint
+        # Save
         ckpt_manager.save()
+        data_manager.save(Paths.USER_DATA_PLUS, Paths.SIMILARITY_PATH)
+
     return model
 
 
@@ -263,8 +296,10 @@ def test(model, checkpoint_dir):
 
 
 def main():
-    data_manager = DataManager(Paths.USER_DATA, Paths.ITEM_DATA, Paths.TOKEN_PATH)
-    data_manager.load(Paths.USER_DATA_PLUS) if Paths.USER_DATA_PLUS.exists() else None
+    data_manager = DataManager(
+        Paths.USER_DATA, Paths.ITEM_DATA, Paths.TOKEN_PATH, Paths.EMBEDDING_PATH
+    )
+    data_manager.load(Paths.USER_DATA_PLUS, Paths.SIMILARITY_PATH)
 
     model = FunkSVD(
         HParams.EMBED_SIZE,

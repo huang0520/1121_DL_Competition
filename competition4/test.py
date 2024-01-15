@@ -1,5 +1,6 @@
 # %%
 import os
+import pickle
 
 import numpy as np
 import pandas as pd
@@ -9,19 +10,25 @@ from icecream import ic
 from src.dataset import DataManager, History, LabelTokenDatasetGenerator
 from src.layer import SparseFMLayer
 from src.recommender import FMEmbeding, SparseFM, SparseHotEncoder
+from tqdm.auto import tqdm, trange
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 # %%
-item_to_tokens = pd.read_pickle("./dataset/item_token.pkl")
-
-# %%
-a, b = item_to_tokens.loc[[0, 222, 333]].to_numpy().T
-a
+similarity_items = pickle.load(open("./dataset/similarity_items.pkl", "rb"))
+len(similarity_items)
 # %%
 a = pd.read_pickle("./dataset/user_data_plus.pkl")
 a["history"].map(len).value_counts()
 
+# %%
+a = pickle.load(open("./dataset/similarity_items.pkl", "rb"))
+
+count = 5
+for k, v in a.items():
+    print(k, v)
+    print(k in v)
+    break
 # %%
 data_manager = DataManager(
     "./dataset/user_data.json", "./dataset/item_data.json", "./dataset/item_token.pkl"

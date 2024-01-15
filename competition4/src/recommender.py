@@ -34,8 +34,8 @@ class FunkSVD(tf.keras.Model):
         # Input
         user_id = Input(shape=(1,), dtype=tf.int32)
         item_id = Input(shape=(1,), dtype=tf.int32)
-        title_token = Input(shape=(num_tokens,), dtype=tf.int32)
-        desc_token = Input(shape=(num_tokens,), dtype=tf.int32)
+        # title_token = Input(shape=(num_tokens,), dtype=tf.int32)
+        # desc_token = Input(shape=(num_tokens,), dtype=tf.int32)
 
         # Embedding
         vec_user = Embedding(
@@ -50,22 +50,22 @@ class FunkSVD(tf.keras.Model):
             embeddings_initializer=RandomNormal(),
             embeddings_regularizer=L2(l2_lambda),
         )(item_id)
-        vec_title = Embedding(
-            num_tokens,
-            num_factors,
-            embeddings_initializer=RandomNormal(),
-            embeddings_regularizer=L2(l2_lambda),
-        )(title_token)
-        vec_desc = Embedding(
-            num_tokens,
-            num_factors,
-            embeddings_initializer=RandomNormal(),
-            embeddings_regularizer=L2(l2_lambda),
-        )(desc_token)
+        # vec_title = Embedding(
+        #     num_tokens,
+        #     num_factors,
+        #     embeddings_initializer=RandomNormal(),
+        #     embeddings_regularizer=L2(l2_lambda),
+        # )(title_token)
+        # vec_desc = Embedding(
+        #     num_tokens,
+        #     num_factors,
+        #     embeddings_initializer=RandomNormal(),
+        #     embeddings_regularizer=L2(l2_lambda),
+        # )(desc_token)
         embeddings = Add()([
             tf.reduce_sum(Dot(axes=2)([vec_user, vec_item]), axis=2, keepdims=True),
-            tf.reduce_sum(Dot(axes=2)([vec_user, vec_title]), axis=2, keepdims=True),
-            tf.reduce_sum(Dot(axes=2)([vec_user, vec_desc]), axis=2, keepdims=True),
+            # tf.reduce_sum(Dot(axes=2)([vec_user, vec_title]), axis=2, keepdims=True),
+            # tf.reduce_sum(Dot(axes=2)([vec_user, vec_desc]), axis=2, keepdims=True),
         ])
 
         # Bias
@@ -81,23 +81,23 @@ class FunkSVD(tf.keras.Model):
             embeddings_initializer=RandomNormal(),
             embeddings_regularizer=L2(l2_lambda),
         )(item_id)
-        b_title = Embedding(
-            num_tokens,
-            1,
-            embeddings_initializer=RandomNormal(),
-            embeddings_regularizer=L2(l2_lambda),
-        )(title_token)
-        b_desc = Embedding(
-            num_tokens,
-            1,
-            embeddings_initializer=RandomNormal(),
-            embeddings_regularizer=L2(l2_lambda),
-        )(desc_token)
+        # b_title = Embedding(
+        #     num_tokens,
+        #     1,
+        #     embeddings_initializer=RandomNormal(),
+        #     embeddings_regularizer=L2(l2_lambda),
+        # )(title_token)
+        # b_desc = Embedding(
+        #     num_tokens,
+        #     1,
+        #     embeddings_initializer=RandomNormal(),
+        #     embeddings_regularizer=L2(l2_lambda),
+        # )(desc_token)
         biases = Add()([
             b_user,
             b_item,
-            tf.reduce_sum(b_title, axis=1, keepdims=True),
-            tf.reduce_sum(b_desc, axis=1, keepdims=True),
+            # tf.reduce_sum(b_title, axis=1, keepdims=True),
+            # tf.reduce_sum(b_desc, axis=1, keepdims=True),
         ])
 
         # Output
@@ -105,63 +105,46 @@ class FunkSVD(tf.keras.Model):
         output = Flatten()(output)
 
         self.model = keras.Model(
-            inputs=(user_id, item_id, title_token, desc_token), outputs=output
+            inputs=(
+                user_id,
+                item_id,
+                # title_token,
+                # desc_token,
+            ),
+            outputs=output,
         )
 
     @tf.function
     def call(self, inputs) -> tf.Tensor:
-        user_id, item_id, title_token, desc_token = inputs
-        title_token = self.token_encoder(title_token)
-        desc_token = self.token_encoder(desc_token)
+        # user_id, item_id, title_token, desc_token = inputs
+        user_id, item_id = inputs
 
-        return self.model((user_id, item_id, title_token, desc_token))
+        # title_token = self.token_encoder(title_token)
+        # desc_token = self.token_encoder(desc_token)
+
+        # return self.model((user_id, item_id, title_token, desc_token))
+        return self.model((user_id, item_id))
 
     @tf.function
     def train_step(self, inputs: tf.Tensor) -> tf.Tensor:
-        user_ids, item_ids, title_tokens, desc_tokens, y_trues = inputs
+        # user_ids, item_ids, title_tokens, desc_tokens, y_trues = inputs
+        user_ids, item_ids, y_trues = inputs
 
         # compute loss
         with tf.GradientTape() as tape:
-            y_preds = self.call((user_ids, item_ids, title_tokens, desc_tokens))
+            # y_preds = self.call((user_ids, item_ids, title_tokens, desc_tokens))
+            y_preds = self.call((user_ids, item_ids))
             loss = self.loss(y_trues, y_preds)
 
         gradients = tape.gradient(loss, self.trainable_variables)
         self.optimizer.apply_gradients(zip(gradients, self.trainable_variables))
         return loss
 
-    @tf.function
-    def update_step(self, inputs):
-        user_id, pos_item_id, neg_item_ids = inputs
-        user_id = tf.expand_dims(user_id, axis=0)
-        pos_item_id = tf.expand_dims(pos_item_id, axis=0)
-
-        with tf.GradientTape() as tape:
-            logit_pos = self.call((user_id, pos_item_id))
-            logits_neg = self.call((
-                tf.repeat(user_id, len(neg_item_ids)),
-                neg_item_ids,
-            ))
-            logits_neg = tf.transpose(logits_neg)
-
-            # InfoNCE loss
-            logits = tf.concat([logit_pos, logits_neg], axis=1)
-            labels = tf.concat(
-                [tf.ones_like(logit_pos), tf.zeros_like(logits_neg)], axis=1
-            )
-
-            loss = keras.losses.CategoricalCrossentropy(from_logits=True)(
-                labels, logits / logits.shape[-1]
-            )
-        gradients = tape.gradient(loss, self.trainable_variables)
-        self.optimizer.apply_gradients(zip(gradients, self.trainable_variables))
-
-        return loss
-
     def get_topk(self, user_id, k=5) -> tf.Tensor:
         user_ids = tf.repeat(tf.constant(user_id), self.num_items)
         item_ids = tf.range(self.num_items)
         rank_list = tf.squeeze(self.call((user_ids, item_ids)))
-        return tf.math.top_k(rank_list, k=k).indices.numpy()
+        return tf.math.top_k(rank_list, k=k).indices.numpy().tolist()
 
 
 class NeuMF(tf.keras.Model):
@@ -213,7 +196,7 @@ class NeuMF(tf.keras.Model):
             tf.repeat(tf.constant(user_id), self.num_items),
             tf.range(self.num_items),
         ))
-        return tf.math.top_k(tf.squeeze(item_probs), k=k).indices.numpy()
+        return tf.math.top_k(tf.squeeze(item_probs), k=k).indices.numpy().tolist()
 
 
 class SparseHotEncoder:
