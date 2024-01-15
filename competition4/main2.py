@@ -96,6 +96,33 @@ def top_k_nearest(sente_id, k):
     return indices
 
 # %%
+#! try batch embedding
+# X = df_embs.numpy()
+# ds_embs = tf.data.Dataset.from_tensor_slices((X))
+# ds_embs = ds_embs.batch(256) # batch size
+
+# def top_k_nearest(sente_id, k):
+#     sim_output=[]
+#     x_test = df_embs[sente_id].numpy()
+#     Y = np.array(x_test , ndmin=2)
+#     # iterator = ds_embs.make_one_shot_iterator()
+#     # x_batch= iterator.get_next()
+#     for next_element in ds_embs:
+#         # tf.print(next_element)
+#         X_norm = tf.sqrt(tf.reduce_sum(tf.square(next_element), axis=1))
+#         Y_norm = tf.sqrt(tf.reduce_sum(tf.square(Y), axis=1))
+#         XY_norm = tf.multiply(X_norm, tf.expand_dims(Y_norm, 1))
+#         XY = tf.multiply(X, Y[:,None])
+#         XY = tf.reduce_sum(XY, 2)
+#         similarity = XY / XY_norm
+#         sim_output.append(similarity)
+#     indices = np.argsort(sim_output)[0][::-1][1:k+1]
+#     top_k_xvals, top_k_indices = tf.nn.top_k(sim_output, k=k) # negative is for ascending order
+#     print(indices)
+#     print(top_k_indices)
+#     return indices
+
+# %%
 # Training pipeline
 def train(model, dataset):
     loss_record = []
@@ -163,7 +190,7 @@ def explore_with_update(env, model, history, slate_size=ConstParams.COLLABORATIV
         slate = np.unique(slate)
         iter_more_slake = 1
         while len(slate) != ConstParams.SLATE_SIZE:
-            print("more")
+            # print("more")
             more_slate = top_k_nearest(last(history.get(user_id)), ConstParams.CONTENT_BASED_SLATE_SIZE + iter_more_slake)
             slate = np.append(slate, more_slate[-1])
             slate = np.unique(slate)
@@ -218,7 +245,7 @@ def simulate_train(model, checkpoint_dir, transfer=False):
         ckpt_manager.save()
     return model
 
-
+# %%
 def test(model, checkpoint_dir):
     test_env = TestingEnvironment()
     scores = []
@@ -245,7 +272,21 @@ def test(model, checkpoint_dir):
                 # [TODO] Employ your recommendation policy to generate a slate of 5 distinct items
                 # [TODO] Code for generating the recommended slate...
                 # Here we provide a simple random implementation
-                slate = model.get_topk(cur_user, 5)
+                # slate = model.get_topk(cur_user, 5)
+                collab_slate = model.get_topk(cur_user, ConstParams.COLLABORATIVE_SLATE_SIZE)
+                # print(last(history.get(0)))
+                # print(((history.get_sequences(0)[-1])))
+                content_slate = top_k_nearest(last(history.get(cur_user)), ConstParams.CONTENT_BASED_SLATE_SIZE)
+                slate = np.concatenate((collab_slate, content_slate))
+                slate = np.unique(slate)
+                iter_more_slake = 1
+                while len(slate) != ConstParams.SLATE_SIZE:
+                    # print("more")
+                    more_slate = top_k_nearest(last(history.get(cur_user)), ConstParams.CONTENT_BASED_SLATE_SIZE + iter_more_slake)
+                    slate = np.append(slate, more_slate[-1])
+                    slate = np.unique(slate)
+                    iter_more_slake += 1
+                assert len(slate.tolist()) == ConstParams.SLATE_SIZE, "wrong slate len"
 
                 # Get the response of the slate from the environment
                 clicked_id, _in_environment = test_env.get_response(slate)
@@ -281,7 +322,7 @@ def test(model, checkpoint_dir):
 
     print(f"Average Score: {np.mean(avg_scores):.6f}")
 
-
+# %%
 def main():
     model = FunkSVD(
         HParams.EMBED_SIZE,
@@ -296,9 +337,9 @@ def main():
         loss=keras.losses.BinaryCrossentropy(from_logits=True),
     )
 
-    model = simulate_train(model, Paths.CHECKPOINT_DIR / "FunkSVD", transfer=False)
+    # model = simulate_train(model, Paths.CHECKPOINT_DIR / "FunkSVD", transfer=False)
 
-    # test(model, Paths.CHECKPOINT_DIR / "FunkSVD")
+    test(model, Paths.CHECKPOINT_DIR / "FunkSVD")
 
 
 # # %% Testing
@@ -358,6 +399,7 @@ def main():
 
 # %%
 if __name__ == "__main__":
-    main()
+    # main()
+    top_k_nearest(0,5)
 
 # %%
