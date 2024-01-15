@@ -180,7 +180,7 @@ def explore(env, model, data_manager, slate_size=5):
         user_id = env.get_state()
         random_pos_item_id = random.choice(tuple(data_manager.pos_item_sets[user_id]))
         coll_slate = model.get_topk(user_id, 3)
-        cont_slate = get_content_topk(data_manager, random_pos_item_id, 2)
+        cont_slate = get_content_topk(data_manager, random_pos_item_id, 2, False)
         slate = np.unique(coll_slate + cont_slate).tolist()
         while len(slate) < slate_size:
             slate = np.unique(
@@ -203,7 +203,12 @@ def explore(env, model, data_manager, slate_size=5):
 # Simulate pipeline
 def simulate_train(model, data_manager, checkpoint_dir, transfer=False):
     checkpoint = tf.train.Checkpoint(model=model)
-    ckpt_manager = tf.train.CheckpointManager(checkpoint, checkpoint_dir, max_to_keep=1)
+    ckpt_manager = tf.train.CheckpointManager(checkpoint, checkpoint_dir, max_to_keep=5)
+    best_manager = tf.train.CheckpointManager(
+        checkpoint, checkpoint_dir / "best", max_to_keep=1
+    )
+    best_score = 0
+
     if transfer:
         checkpoint.restore(ckpt_manager.latest_checkpoint)
         print(f"Model restored from {ckpt_manager.latest_checkpoint}.")
@@ -223,21 +228,25 @@ def simulate_train(model, data_manager, checkpoint_dir, transfer=False):
 
         # Explore and update
         model, _ = explore(env, model, data_manager, ConstParams.SLATE_SIZE)
-        print(f"Average Score: {np.mean(env.get_score()):.6f}")
+        score = np.mean(env.get_score())
+        print(f"Avg. Score: {score:.6f}")
 
         # Save
         ckpt_manager.save()
         data_manager.save(Paths.USER_DATA_PLUS, Paths.SIMILARITY_PATH)
 
+        # Save best model
+        if score > best_score:
+            best_score = score
+            best_manager.save()
+            print(f"Best model saved at {best_manager.latest_checkpoint}.")
+
     return model
 
 
-def test(model, checkpoint_dir):
+def test(model, checkpoint_dir, data_manager):
     test_env = TestingEnvironment()
     scores = []
-
-    # The item_ids here is for the random recommender
-    list(range(ConstParams.N_ITEMS))
 
     # Repeat the testing process for 5 times
     for epoch in range(ConstParams.TEST_EPISODES):
@@ -247,6 +256,7 @@ def test(model, checkpoint_dir):
         checkpoint = tf.train.Checkpoint(model=model)
         checkpoint.restore(tf.train.latest_checkpoint(checkpoint_dir))
         history = History(Paths.USER_DATA)
+        clicked_count = 0
 
         # Start the testing process
         with tqdm(desc="Testing") as pbar:
@@ -257,8 +267,23 @@ def test(model, checkpoint_dir):
 
                 # [TODO] Employ your recommendation policy to generate a slate of 5 distinct items
                 # [TODO] Code for generating the recommended slate...
-                # Here we provide a simple random implementation
-                slate = model.get_topk(cur_user, 5)
+                # latest_item_id = history.get(cur_user)[-1]
+                random_pos_item_id = random.choice(
+                    np.unique(history.get(cur_user)).tolist()
+                )
+                coll_slate = model.get_topk(cur_user, 3)
+                cont_slate = get_content_topk(
+                    data_manager, random_pos_item_id, 2, False
+                )
+                slate = np.unique(coll_slate + cont_slate).tolist()
+                while len(slate) < ConstParams.SLATE_SIZE:
+                    slate = np.unique(
+                        slate
+                        + random.sample(
+                            model.get_topk(cur_user, 10),
+                            ConstParams.SLATE_SIZE - len(slate),
+                        )
+                    ).tolist()
 
                 # Get the response of the slate from the environment
                 clicked_id, _in_environment = test_env.get_response(slate)
@@ -266,7 +291,11 @@ def test(model, checkpoint_dir):
                 # [TODO] Update your model here (optional)
                 # [TODO] You can update your model at each step, or perform a batched update after some interval
                 # [TODO] Code for updating your model...
-                model, _ = update(model, history, cur_user, slate, clicked_id)
+                if clicked_id != -1:
+                    clicked_count += 1
+                    history.add(cur_user, clicked_id)
+                    model = update(model, cur_user, clicked_id)
+                    pbar.set_postfix({"#click": clicked_count})
 
                 # Update the progress indicator
                 pbar.update(1)
@@ -321,7 +350,9 @@ def main():
         model, data_manager, Paths.CHECKPOINT_DIR / "FunkSVD", transfer=False
     )
 
-    # test(model, Paths.CHECKPOINT_DIR / "FunkSVD")
+    test(model, Paths.CHECKPOINT_DIR / "FunkSVD" / "best", data_manager)
+
+    data_manager.save(Paths.USER_DATA_PLUS, Paths.SIMILARITY_PATH)
 
 
 if __name__ == "__main__":
