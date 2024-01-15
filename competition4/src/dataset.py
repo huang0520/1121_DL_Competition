@@ -76,7 +76,8 @@ class DataManager:
 
         self.pairs = set(df_user.explode("history").itertuples(index=False, name=None))
         self.item_to_tokens = pd.read_pickle(token_path)
-        self.item_to_embedding = pd.read_pickle(embedding_path)
+        item_to_embedding = pd.read_pickle(embedding_path)
+        self.item_to_embeddings = item_to_embedding.apply(list, axis=1)
 
         self.pos_item_sets = df_user["history"].apply(set).to_list()
         self.similarity_items = {}
@@ -119,20 +120,16 @@ class DataManager:
 
 
 class LabelTokenDatasetGenerator:
-    def __init__(self, user_item_pairs, item_to_tokens):
+    def __init__(self, user_item_pairs, item_to_embeddings):
         self.df_seq = pd.DataFrame(user_item_pairs, columns=["user_id", "item_id"])
-        self.df_seq["title"] = self.df_seq["item_id"].map(item_to_tokens["headline"])
-        self.df_seq["desc"] = self.df_seq["item_id"].map(
-            item_to_tokens["short_description"]
-        )
+        self.df_seq["embeddings"] = self.df_seq["item_id"].map(item_to_embeddings)
         self.df_seq["label"] = 1
 
     def __call__(self, batch_size):
         dataset: tf.data.Dataset = tf.data.Dataset.from_tensor_slices((
             tf.convert_to_tensor(self.df_seq["user_id"].to_numpy(dtype=int)),
             tf.convert_to_tensor(self.df_seq["item_id"].to_numpy(dtype=int)),
-            tf.ragged.constant(self.df_seq["title"].to_numpy()),
-            tf.ragged.constant(self.df_seq["desc"].to_numpy()),
+            tf.convert_to_tensor(self.df_seq["embeddings"].to_list(), dtype=tf.float32),
             tf.convert_to_tensor(self.df_seq["label"].to_numpy(dtype=int)),
         ))
         dataset = dataset.shuffle(buffer_size=batch_size * 10)

@@ -14,77 +14,19 @@ from tqdm.auto import tqdm, trange
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
-# %%
-similarity_items = pickle.load(open("./dataset/similarity_items.pkl", "rb"))
-len(similarity_items)
-# %%
-a = pd.read_pickle("./dataset/user_data_plus.pkl")
-a["history"].map(len).value_counts()
 
-# %%
-a = pickle.load(open("./dataset/similarity_items.pkl", "rb"))
-
-count = 5
-for k, v in a.items():
-    print(k, v)
-    print(k in v)
-    break
 # %%
 data_manager = DataManager(
-    "./dataset/user_data.json", "./dataset/item_data.json", "./dataset/item_token.pkl"
+    "./dataset/user_data.json",
+    "./dataset/item_data.json",
+    "./dataset/item_token.pkl",
+    "./dataset/item_to_embedding.pkl",
 )
-dataset_generator = LabelTokenDatasetGenerator(
-    data_manager.get_sequences(), data_manager.item_to_tokens
-)
-
-encoder = SparseHotEncoder(2000, 209527, 49408)
-model = SparseFM(8, 0.1, 0.1)
-model.compile(
-    optimizer=tf.keras.optimizers.Adam(),
-    loss=tf.keras.losses.BinaryCrossentropy(from_logits=True),
-)
-
-dataset = dataset_generator(8)
-for data in dataset:
-    user_ids, item_ids, title, desc, labels = data
-
-    features = encoder((user_ids, item_ids, title, desc))
-    loss = model.train_step((features, labels))
-    break
-
-fm_embedding = FMEmbeding(encoder, 2000, 209527, 49408, model)
-
-df_seq = dataset_generator.df_seq
-user_embedding_dict = fm_embedding.get_user_embedding(df_seq)
-item_embedding_dict = fm_embedding.get_item_embedding(df_seq)
-
-
-count = 5
-for k, v in user_embedding_dict.items():
-    ic(k, v)
-    count -= 1
-    if count == 0:
-        break
+data_manager.load("./dataset/user_plus.pkl", "./dataset/similarity.pkl")
 
 # %%
-# user_embedder = tf.keras.layers.Embedding(
-#     len(df_user),
-#     64,
-#     embeddings_initializer="random_normal",
-#     embeddings_regularizer=tf.keras.regularizers.L2(0.1),
-#     sparse=True,
-# )
-# item_embedder = tf.keras.layers.Embedding(
-#     len(item_to_tokens),
-#     64,
-#     embeddings_initializer="random_normal",
-#     embeddings_regularizer=tf.keras.regularizers.L2(0.1),
-#     sparse=True,
-# )
-# token_embedder = tf.keras.layers.Embedding(
-#     30522,
-#     64,
-#     embeddings_initializer="random_normal",
-#     embeddings_regularizer=tf.keras.regularizers.L2(0.1),
-#     sparse=True,
-# )
+df_seq = pd.DataFrame(data_manager.get_sequences(), columns=["user_id", "item_id"])
+item_to_embeddings: pd.DataFrame = data_manager.item_to_embedding
+item_to_embeddings = item_to_embeddings.apply(tuple, axis=1)
+df_seq["embeddings"] = df_seq["item_id"].map(item_to_embeddings)
+print(tf.convert_to_tensor(df_seq["embeddings"].to_list(), tf.float32))

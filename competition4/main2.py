@@ -50,15 +50,14 @@ class ConstParams:
 
 @dataclass
 class HParams:
-    EMBED_SIZE: int = 128
+    EMBED_SIZE: int = 384
     BATCH_SIZE: int = 128
     LEARNING_RATE: float = 0.00005
     WEIGHT_DECAY: float = 0.0004
     RANDOM_STATE: int = 42
     NUM_EPOCHS: int = 5
     NUM_EPOSIDES: int = 100
-    NUMS_HIDDENS: tuple[int] = (64, 32, 16, 8)
-    N_NEGTIVES: int = 14
+    N_NEGTIVES: int = 8
 
 
 @dataclass
@@ -85,7 +84,7 @@ def train(model, dataset, data_manager, n_neg=14):
     for _ in pbar:
         batch_loss = []
 
-        for user_ids, pos_item_ids, title_tokens, desc_tokens, labels in dataset:
+        for user_ids, pos_item_ids, text_embeddings, labels in dataset:
             losses = []
             batch_size = len(user_ids)
 
@@ -93,8 +92,7 @@ def train(model, dataset, data_manager, n_neg=14):
             loss = model.train_step((
                 user_ids,
                 pos_item_ids,
-                # title_tokens,
-                # desc_tokens,
+                text_embeddings,
                 labels,
             ))
             losses.append(loss)
@@ -107,14 +105,12 @@ def train(model, dataset, data_manager, n_neg=14):
                 dtype=tf.int32,
             )
             for _neg_item_id in neg_item_ids:
-                # neg_title_tokens, neg_desc_tokens = (
-                #     data_manager.item_to_tokens.loc[_neg_item_id].to_numpy().T
-                # )
                 loss = model.train_step((
                     tf.constant(user_ids),
                     tf.constant(_neg_item_id),
-                    # tf.ragged.constant(neg_title_tokens),
-                    # tf.ragged.constant(neg_desc_tokens),
+                    tf.constant(
+                        data_manager.item_to_embeddings[_neg_item_id].to_list()
+                    ),
                     tf.zeros(batch_size),
                 ))
                 losses.append(loss)
@@ -127,11 +123,12 @@ def train(model, dataset, data_manager, n_neg=14):
     return model, np.mean(epoch_loss)
 
 
-def update(model, user_id, clicked_id):
+def update(model, data_manager, user_id, clicked_id):
     # Positive samples
     model.train_step((
         tf.convert_to_tensor([[user_id]]),
         tf.convert_to_tensor([[clicked_id]]),
+        tf.convert_to_tensor([data_manager.item_to_embeddings[clicked_id]]),
         tf.ones(1),
     ))
 
@@ -142,9 +139,13 @@ def update(model, user_id, clicked_id):
         maxval=ConstParams.N_ITEMS,
         dtype=tf.int32,
     )
+    neg_embeddings = tf.convert_to_tensor(
+        data_manager.item_to_embeddings[neg_item_ids].to_list()
+    )
     model.train_step((
         tf.repeat(user_id, HParams.N_NEGTIVES),
         neg_item_ids,
+        neg_embeddings,
         tf.zeros(HParams.N_NEGTIVES),
     ))
 
@@ -156,14 +157,14 @@ def get_content_topk(data_manager, clicked_id, k=2, choose_self=True):
     if clicked_id in data_manager.similarity_items:
         return data_manager.similarity_items[clicked_id][n : n + k]
 
-    item_to_embedding = data_manager.item_to_embedding
+    item_to_embeddings = data_manager.item_to_embeddings
     scores = tf.losses.CosineSimilarity(reduction="none")(
         tf.repeat(
-            tf.constant(item_to_embedding.iloc[clicked_id], shape=(1, 384)),
-            len(item_to_embedding),
+            tf.constant(item_to_embeddings.iloc[clicked_id], shape=(1, 384)),
+            len(item_to_embeddings),
             axis=0,
         ),
-        tf.constant(item_to_embedding),
+        tf.constant(item_to_embeddings.to_list()),
     )
 
     sort_items = tf.argsort(scores).numpy().tolist()
@@ -179,7 +180,7 @@ def explore(env, model, data_manager, slate_size=5):
     while env.has_next_state():
         user_id = env.get_state()
         random_pos_item_id = random.choice(tuple(data_manager.pos_item_sets[user_id]))
-        coll_slate = model.get_topk(user_id, 3)
+        coll_slate = model.get_topk(user_id, data_manager, 3)
         cont_slate = get_content_topk(data_manager, random_pos_item_id, 2, False)
         slate = np.unique(coll_slate + cont_slate).tolist()
         while len(slate) < slate_size:
@@ -192,7 +193,7 @@ def explore(env, model, data_manager, slate_size=5):
         if clicked_id != -1:
             hit_count += 1
             data_manager.add(user_id, clicked_id)
-            model = update(model, user_id, clicked_id)
+            model = update(model, data_manager, user_id, clicked_id)
 
         pbar.update(1)
         pbar.set_postfix({"#click": hit_count})
@@ -219,7 +220,7 @@ def simulate_train(model, data_manager, checkpoint_dir, transfer=False):
         # Initialize
         env = TrainingEnvironment()
         dataset_generator = LabelTokenDatasetGenerator(
-            data_manager.get_sequences(), data_manager.item_to_tokens
+            data_manager.get_sequences(), data_manager.item_to_embeddings
         )
 
         # Train
@@ -294,7 +295,7 @@ def test(model, checkpoint_dir, data_manager):
                 if clicked_id != -1:
                     clicked_count += 1
                     history.add(cur_user, clicked_id)
-                    model = update(model, cur_user, clicked_id)
+                    model = update(model, data_manager, cur_user, clicked_id)
                     pbar.set_postfix({"#click": clicked_count})
 
                 # Update the progress indicator
@@ -334,7 +335,6 @@ def main():
         HParams.EMBED_SIZE,
         ConstParams.N_TRAIN_USERS,
         ConstParams.N_ITEMS,
-        ConstParams.NUM_TOKENS,
         l2_lambda=0.005,
     )
     model.compile(
@@ -342,7 +342,7 @@ def main():
             learning_rate=0.0001, weight_decay=0.0004, use_ema=True
         ),
         loss=tf.keras.losses.BinaryFocalCrossentropy(
-            apply_class_balancing=True, from_logits=True, label_smoothing=0.1
+            apply_class_balancing=True, from_logits=True, label_smoothing=0.15
         ),
     )
 
