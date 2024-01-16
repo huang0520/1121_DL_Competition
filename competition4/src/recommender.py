@@ -16,9 +16,7 @@ class FunkSVD(tf.keras.Model):
     Simplified Funk-SVD recommender model
     """
 
-    def __init__(
-        self, num_factors, num_users, num_items, num_tokens, l2_lambda=0.1, **kwargs
-    ):
+    def __init__(self, num_factors, num_users, num_items, l2_lambda=0.1, **kwargs):
         """
         Constructor of the model
         """
@@ -27,15 +25,9 @@ class FunkSVD(tf.keras.Model):
         self.num_users = num_users
         self.num_items = num_items
 
-        self.token_encoder = tf.keras.layers.CategoryEncoding(
-            num_tokens, output_mode="multi_hot"
-        )
-
         # Input
         user_id = Input(shape=(1,), dtype=tf.int32)
         item_id = Input(shape=(1,), dtype=tf.int32)
-        # title_token = Input(shape=(num_tokens,), dtype=tf.int32)
-        # desc_token = Input(shape=(num_tokens,), dtype=tf.int32)
 
         # Embedding
         vec_user = Embedding(
@@ -50,22 +42,8 @@ class FunkSVD(tf.keras.Model):
             embeddings_initializer=RandomNormal(),
             embeddings_regularizer=L2(l2_lambda),
         )(item_id)
-        # vec_title = Embedding(
-        #     num_tokens,
-        #     num_factors,
-        #     embeddings_initializer=RandomNormal(),
-        #     embeddings_regularizer=L2(l2_lambda),
-        # )(title_token)
-        # vec_desc = Embedding(
-        #     num_tokens,
-        #     num_factors,
-        #     embeddings_initializer=RandomNormal(),
-        #     embeddings_regularizer=L2(l2_lambda),
-        # )(desc_token)
         embeddings = Add()([
             tf.reduce_sum(Dot(axes=2)([vec_user, vec_item]), axis=2, keepdims=True),
-            # tf.reduce_sum(Dot(axes=2)([vec_user, vec_title]), axis=2, keepdims=True),
-            # tf.reduce_sum(Dot(axes=2)([vec_user, vec_desc]), axis=2, keepdims=True),
         ])
 
         # Bias
@@ -81,23 +59,9 @@ class FunkSVD(tf.keras.Model):
             embeddings_initializer=RandomNormal(),
             embeddings_regularizer=L2(l2_lambda),
         )(item_id)
-        # b_title = Embedding(
-        #     num_tokens,
-        #     1,
-        #     embeddings_initializer=RandomNormal(),
-        #     embeddings_regularizer=L2(l2_lambda),
-        # )(title_token)
-        # b_desc = Embedding(
-        #     num_tokens,
-        #     1,
-        #     embeddings_initializer=RandomNormal(),
-        #     embeddings_regularizer=L2(l2_lambda),
-        # )(desc_token)
         biases = Add()([
             b_user,
             b_item,
-            # tf.reduce_sum(b_title, axis=1, keepdims=True),
-            # tf.reduce_sum(b_desc, axis=1, keepdims=True),
         ])
 
         # Output
@@ -108,31 +72,20 @@ class FunkSVD(tf.keras.Model):
             inputs=(
                 user_id,
                 item_id,
-                # title_token,
-                # desc_token,
             ),
             outputs=output,
         )
 
     @tf.function
     def call(self, inputs) -> tf.Tensor:
-        # user_id, item_id, title_token, desc_token = inputs
-        user_id, item_id = inputs
-
-        # title_token = self.token_encoder(title_token)
-        # desc_token = self.token_encoder(desc_token)
-
-        # return self.model((user_id, item_id, title_token, desc_token))
-        return self.model((user_id, item_id))
+        return self.model(inputs)
 
     @tf.function
     def train_step(self, inputs: tf.Tensor) -> tf.Tensor:
-        # user_ids, item_ids, title_tokens, desc_tokens, y_trues = inputs
         user_ids, item_ids, y_trues = inputs
 
         # compute loss
         with tf.GradientTape() as tape:
-            # y_preds = self.call((user_ids, item_ids, title_tokens, desc_tokens))
             y_preds = self.call((user_ids, item_ids))
             loss = self.loss(y_trues, y_preds)
 
