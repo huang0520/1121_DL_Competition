@@ -24,12 +24,10 @@ class FunkSVD(tf.keras.Model):
 
         self.num_users = num_users
         self.num_items = num_items
-        self.continue_hit_count = 0
 
         # Input
         user_id = Input(shape=(1,), dtype=tf.int32)
         item_id = Input(shape=(1,), dtype=tf.int32)
-        text_embeddings = Input(shape=(num_factors,), dtype=tf.float32)
 
         # Embedding
         vec_user = Embedding(
@@ -45,8 +43,7 @@ class FunkSVD(tf.keras.Model):
             embeddings_regularizer=L2(l2_lambda),
         )(item_id)
         embeddings = Add()([
-            Dot(axes=2)([vec_user, vec_item]),
-            Dot(axes=2)([vec_user, tf.expand_dims(text_embeddings, axis=1)]),
+            tf.reduce_sum(Dot(axes=2)([vec_user, vec_item]), axis=2, keepdims=True),
         ])
 
         # Bias
@@ -72,23 +69,24 @@ class FunkSVD(tf.keras.Model):
         output = Flatten()(output)
 
         self.model = keras.Model(
-            inputs=(user_id, item_id, text_embeddings),
+            inputs=(
+                user_id,
+                item_id,
+            ),
             outputs=output,
         )
 
     @tf.function
     def call(self, inputs) -> tf.Tensor:
-        user_id, item_id, text_embedding = inputs
-        return self.model((user_id, item_id, text_embedding))
+        return self.model(inputs)
 
     @tf.function
     def train_step(self, inputs: tf.Tensor) -> tf.Tensor:
-        # user_ids, item_ids, title_tokens, desc_tokens, y_trues = inputs
-        user_ids, item_ids, text_embeddings, y_trues = inputs
+        user_ids, item_ids, y_trues = inputs
 
         # compute loss
         with tf.GradientTape() as tape:
-            y_preds = self.call((user_ids, item_ids, text_embeddings))
+            y_preds = self.call((user_ids, item_ids))
             loss = self.loss(y_trues, y_preds)
 
         gradients = tape.gradient(loss, self.trainable_variables)

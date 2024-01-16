@@ -77,7 +77,7 @@ random.seed(HParams.RANDOM_STATE)
 
 # %%
 # Training pipeline
-def train(model, dataset, data_manager, n_neg=14):
+def train(model, dataset, n_neg=14):
     epoch_loss = []
 
     pbar = trange(HParams.NUM_EPOCHS, desc="Training", ncols=0)
@@ -92,7 +92,6 @@ def train(model, dataset, data_manager, n_neg=14):
             loss = model.train_step((
                 user_ids,
                 pos_item_ids,
-                text_embeddings,
                 labels,
             ))
             losses.append(loss)
@@ -108,9 +107,6 @@ def train(model, dataset, data_manager, n_neg=14):
                 loss = model.train_step((
                     tf.constant(user_ids),
                     tf.constant(_neg_item_id),
-                    tf.constant(
-                        data_manager.item_to_embeddings[_neg_item_id].to_list()
-                    ),
                     tf.zeros(batch_size),
                 ))
                 losses.append(loss)
